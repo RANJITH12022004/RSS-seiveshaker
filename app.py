@@ -1,6 +1,6 @@
  #!/usr/bin/env python3
 """
-app.py - Flask application for Friability Tester
+app.py - Flask application for Sieve Shaker CFR
 Serves static files and REST API for data, auth, audit, reports, and print.
 """
 
@@ -30,9 +30,12 @@ import calculation_service
 import report_service
 import print_service
 import hardware_service
+import shaker_run_service
 import biometric_service
 import rtc_service
 import network_service
+import scale_service
+import hx711_service
 import usb_export
 import pdf_generator
 
@@ -81,7 +84,7 @@ BIOMETRIC_ENROLL_TIMEOUT_SEC = float(os.environ.get("BIOMETRIC_ENROLL_TIMEOUT_SE
 BIOMETRIC_LOGIN_TIMEOUT_SEC = float(os.environ.get("BIOMETRIC_LOGIN_TIMEOUT_SEC", "30"))
 FLASK_HOST = os.environ.get("FLASK_HOST", "127.0.0.1")
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5000"))
-EXPORT_SUBFOLDER = "Friability-Reports-Exported"
+EXPORT_SUBFOLDER = "SieveShaker-Reports-Exported"
 DATETIME_STORAGE = STORAGE_DIR / "datetime.json"
 APPROVAL_VERIFY_TTL_SECONDS = int(os.environ.get("APPROVAL_VERIFY_TTL_SECONDS", "180"))
 
@@ -122,6 +125,23 @@ calculation_service.init()
 report_service.init(config)
 print_service.init(config)
 hardware_service.init(app, config)
+
+scale_config = {
+    "SCALE_PORT": os.environ.get("SCALE_PORT", ""),
+    "SCALE_BAUD": os.environ.get("SCALE_BAUD", "9600"),
+    "SCALE_BYTESIZE": os.environ.get("SCALE_BYTESIZE", "8"),
+    "SCALE_PARITY": os.environ.get("SCALE_PARITY", "N"),
+    "SCALE_STOPBITS": os.environ.get("SCALE_STOPBITS", "1"),
+    "SCALE_READ_MODE": os.environ.get("SCALE_READ_MODE", "line"),
+    "SCALE_FRAME_SIZE": os.environ.get("SCALE_FRAME_SIZE", "8"),
+    "SCALE_UNIT_MULTIPLIER": os.environ.get("SCALE_UNIT_MULTIPLIER", "1"),
+}
+scale_service.init(app, scale_config)
+hx711_config = {
+    "HX711_SCALE_FACTOR": os.environ.get("HX711_SCALE_FACTOR", "1.0"),
+    "HX711_TARE_OFFSET": os.environ.get("HX711_TARE_OFFSET", "0.0"),
+}
+hx711_service.init(hx711_config)
 
 _enroll_sessions = {}
 _enroll_sessions_lock = threading.Lock()
@@ -5294,8 +5314,8 @@ def calibrate_tare():
 
 
 
-@app.route("/api/hardware/friability/start", methods=["POST"])
-def friability_start():
+@app.route("/api/hardware/shaker/start", methods=["POST"])
+def shaker_start():
     gate = _require_any_session_internal(
         ["quick-test", "recipe-test", "validation-test"],
         "Forbidden. You do not have permission to run hardware tests.",
@@ -5303,86 +5323,111 @@ def friability_start():
     if gate:
         return gate
     data = request.get_json(force=True, silent=True) or {}
-    rpm = data.get("rpm", 25)
-    mode = str(data.get("mode") or "start").strip().lower()
-    if mode in ("val", "validation"):
-        result = hardware_service.cmd_start_validation(rpm)
-    else:
-        result = hardware_service.cmd_start_friability(rpm)
+    amplitude = data.get("amplitude", 15)
+    mode = str(data.get("mode") or "C").strip()
+    result = hardware_service.cmd_shaker_start(amplitude, mode)
     return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/shaker/stop", methods=["POST"])
+def shaker_stop():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test", "validation-test"],
+        "Forbidden. You do not have permission to run hardware tests.",
+    )
+    if gate:
+        return gate
+    data = request.get_json(force=True, silent=True) or {}
+    mode = str(data.get("mode") or "C").strip()
+    return jsonify(hardware_service.cmd_shaker_stop(mode))
+
+
+@app.route("/api/hardware/shaker/live", methods=["GET"])
+def shaker_live():
+    """Latest shaker program state (phase, elapsed, amplitude)."""
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test", "validation-test"],
+        "Forbidden. You do not have permission to run hardware tests.",
+    )
+    if gate:
+        return gate
+    return jsonify(shaker_run_service.get_program_status())
+
+
+@app.route("/api/hardware/shaker/run-program", methods=["POST"])
+def shaker_run_program():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test"],
+        "Forbidden. You do not have permission to run hardware tests.",
+    )
+    if gate:
+        return gate
+    data = request.get_json(force=True, silent=True) or {}
+    validation = calculation_service.validate_recipe(data)
+    if not validation.get("valid"):
+        return jsonify({"ok": False, "error": validation.get("error")}), 400
+    program = calculation_service.process_recipe_form_data(data)
+    result = shaker_run_service.start_program(program)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/shaker/complete", methods=["POST"])
+def shaker_complete():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test"],
+        "Forbidden. You do not have permission to run hardware tests.",
+    )
+    if gate:
+        return gate
+    return jsonify(shaker_run_service.complete_program())
+
+
+@app.route("/api/hardware/shaker/abort", methods=["POST"])
+def shaker_abort():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test"],
+        "Forbidden. You do not have permission to run hardware tests.",
+    )
+    if gate:
+        return gate
+    return jsonify(shaker_run_service.abort_program())
+
+
+@app.route("/api/hardware/friability/start", methods=["POST"])
+def friability_start():
+    """Deprecated — use /api/hardware/shaker/start."""
+    return shaker_start()
 
 
 @app.route("/api/hardware/friability/pause", methods=["POST"])
 def friability_pause():
-    gate = _require_any_session_internal(
-        ["quick-test", "recipe-test", "validation-test"],
-        "Forbidden. You do not have permission to run hardware tests.",
-    )
-    if gate:
-        return gate
-    result = hardware_service.cmd_pause_friability()
-    return jsonify(result), (200 if result.get("ok") else 400)
+    return jsonify({"ok": False, "error": "pause_not_supported", "deprecated": True}), 410
 
 
 @app.route("/api/hardware/friability/resume", methods=["POST"])
 def friability_resume():
-    gate = _require_any_session_internal(
-        ["quick-test", "recipe-test", "validation-test"],
-        "Forbidden. You do not have permission to run hardware tests.",
-    )
-    if gate:
-        return gate
-    result = hardware_service.cmd_resume_friability()
-    return jsonify(result), (200 if result.get("ok") else 400)
+    return jsonify({"ok": False, "error": "resume_not_supported", "deprecated": True}), 410
 
 
 @app.route("/api/hardware/friability/live", methods=["GET"])
 def friability_live():
-    """Latest rotation count and RPM parsed from ESP stream."""
-    gate = _require_any_session_internal(
-        ["quick-test", "recipe-test", "validation-test"],
-        "Forbidden. You do not have permission to run hardware tests.",
-    )
-    if gate:
-        return gate
-    state = hardware_service.get_live_state()
-    return jsonify({"ok": True, **state})
+    return shaker_live()
 
 
 @app.route("/api/hardware/friability/stop", methods=["POST"])
 def friability_stop():
-    gate = _require_any_session_internal(
-        ["quick-test", "recipe-test", "validation-test"],
-        "Forbidden. You do not have permission to run hardware tests.",
-    )
-    if gate:
-        return gate
-    return jsonify(hardware_service.cmd_stop_friability())
+    return shaker_stop()
 
 
 @app.route("/api/hardware/friability/initialise", methods=["POST"])
 @app.route("/api/hardware/friability/initialize", methods=["POST"])
 def friability_initialise():
-    gate = _require_any_session_internal(
-        ["quick-test", "recipe-test"],
-        "Forbidden. You do not have permission to run hardware tests.",
-    )
-    if gate:
-        return gate
-    result = hardware_service.cmd_initialise()
-    return jsonify(result), (200 if result.get("ok") else 400)
+    return jsonify({"ok": False, "error": "initialize_not_supported", "deprecated": True}), 410
 
 
 @app.route("/api/hardware/friability/dispense", methods=["POST"])
 def friability_dispense():
-    gate = _require_any_session_internal(
-        ["quick-test", "recipe-test"],
-        "Forbidden. You do not have permission to run hardware tests.",
-    )
-    if gate:
-        return gate
-    result = hardware_service.cmd_dispense()
-    return jsonify(result), (200 if result.get("ok") else 400)
+    return jsonify({"ok": False, "error": "dispense_not_supported", "deprecated": True}), 410
 
 
 @app.route("/api/hardware/validation/load/start", methods=["POST"])
@@ -5826,6 +5871,23 @@ def _export_purge_loop():
 def _start_export_purge_thread():
     t = threading.Thread(target=_export_purge_loop, daemon=True, name="export-purge")
     t.start()
+
+
+@app.route("/api/scale/read", methods=["GET"])
+def api_scale_read():
+    result = hx711_service.read_weight()
+    return jsonify(result)
+
+
+@app.route("/api/scale/tare", methods=["POST"])
+def api_scale_tare():
+    ok = hx711_service.tare()
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/scale/status", methods=["GET"])
+def api_scale_status():
+    return jsonify(scale_service.get_status())
 
 
 _startup_session_power_audit()

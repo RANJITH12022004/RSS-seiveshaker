@@ -3063,7 +3063,7 @@ body {
 
 .report-a4-text-preview {
     display: block;
-    width: fit-content;
+    width: 100%;
     max-width: 100%;
     margin: 0 auto;
     padding: 0;
@@ -3084,14 +3084,14 @@ body {
     font-family: 'Courier New', Courier, monospace;
     font-size: 11pt;
     line-height: 1.2;
-    width: fit-content;
-    max-width: min(100%, 220mm);
+    width: 100%;
+    max-width: 100%;
     margin: 24px auto;
     padding: 14mm 12mm;
     min-height: auto;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
 }
 
 .report-preview-container.report-a4-preview-mode #report-approve-panel {
@@ -3101,12 +3101,12 @@ body {
 
 #page-report-preview .report-preview-actions {
     width: 100%;
-    max-width: min(100%, 220mm);
+    max-width: 100%;
 }
 
 #page-report-preview .report-pending-lock-banner {
     width: 100%;
-    max-width: min(100%, 220mm);
+    max-width: 100%;
 }
 
 .report-preview-container h1 {
@@ -5181,6 +5181,73 @@ input[type="number"] {
     background: linear-gradient(135deg, #fbbf24, #f59e0b);
 }
 
+/* Hardware mode badge (C / I indicator during test) */
+.hw-mode-badge {
+    display: inline-block;
+    width: 36px;
+    height: 36px;
+    line-height: 36px;
+    text-align: center;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 18px;
+    margin-top: 8px;
+    color: #fff;
+    transition: background 0.2s ease;
+}
+.hw-mode-badge.badge-continuous {
+    background: #22c55e;
+}
+.hw-mode-badge.badge-intermittent {
+    background: #f59e0b;
+}
+.hw-mode-badge.badge-off {
+    background: rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.4);
+}
+
+/* Procedure cards: Continuous / Intermittent / Logical (Sieve Shaker) */
+.create-recipe-step1-page .create-recipe-card[data-procedure="continuous"] {
+    background: linear-gradient(135deg, #007AFF, #0056b3);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="continuous"]:hover {
+    background: linear-gradient(135deg, #4A9FFF, #007AFF);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="intermittent"] {
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="intermittent"]:hover {
+    background: linear-gradient(135deg, #fbbf24, #f59e0b);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="logical"] {
+    background: linear-gradient(135deg, #a855f7, #7c3aed);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="logical"]:hover {
+    background: linear-gradient(135deg, #c084fc, #a855f7);
+}
+
+/* Validation Type cards: Continuous / Intermediate */
+.create-recipe-step1-page .create-recipe-card[data-procedure="continuous-vt"] {
+    background: linear-gradient(135deg, #22c55e, #16a34a);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="continuous-vt"]:hover {
+    background: linear-gradient(135deg, #4ade80, #22c55e);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="intermediate-vt"] {
+    background: linear-gradient(135deg, #0ea5e9, #0284c7);
+}
+
+.create-recipe-step1-page .create-recipe-card[data-procedure="intermediate-vt"]:hover {
+    background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+}
+
 /* Procedure picker: one row × three cards (USP 1 | USP 2 | Custom); stack on narrow viewports */
 .validation-type-grid.procedure-cards-grid {
     display: grid;
@@ -7251,7 +7318,7 @@ input[type="number"] {
 
 .report-a4-text-preview {
     display: block;
-    width: fit-content;
+    width: 100%;
     max-width: 100%;
     margin: 0 auto;
     padding: 0;
@@ -7272,14 +7339,14 @@ input[type="number"] {
     font-family: 'Courier New', Courier, monospace;
     font-size: 11pt;
     line-height: 1.2;
-    width: fit-content;
-    max-width: min(100%, 220mm);
+    width: 100%;
+    max-width: 100%;
     margin: 24px auto;
     padding: 14mm 12mm;
     min-height: auto;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
 }
 
 .report-preview-container.report-a4-preview-mode #report-approve-panel {
@@ -7289,12 +7356,12 @@ input[type="number"] {
 
 #page-report-preview .report-preview-actions {
     width: 100%;
-    max-width: min(100%, 220mm);
+    max-width: 100%;
 }
 
 #page-report-preview .report-pending-lock-banner {
     width: 100%;
-    max-width: min(100%, 220mm);
+    max-width: 100%;
 }
 
 .report-preview-container h1 {
@@ -9745,4 +9812,742 @@ body.keyboard-open {
     box-sizing: border-box;
     gap: 2px;
     overflow: visible;
+}
+
+/* Sieve Shaker CFR test run */
+.shaker-test-run-page .shaker-run-main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+    flex: 1;
+    padding: 1rem;
+}
+
+.shaker-status-panel {
+    text-align: center;
+    padding: 1.5rem 2rem;
+    border-radius: 12px;
+    background: rgba(30, 41, 59, 0.45);
+    min-width: 280px;
+}
+
+.shaker-status-icon {
+    font-size: 3rem;
+    line-height: 1;
+    opacity: 0.5;
+    transition: opacity 0.3s, transform 0.3s;
+}
+
+.shaker-status-icon.shaker-active {
+    opacity: 1;
+    animation: shaker-pulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes shaker-pulse {
+    from { transform: translateY(0); }
+    to { transform: translateY(-4px); }
+}
+
+.shaker-remaining,
+.shaker-segment-info {
+    font-size: 1rem;
+    color: rgba(232, 240, 252, 0.85);
+    margin-top: 0.5rem;
+}
+
+.shaker-controls {
+    width: 100%;
+    max-width: 420px;
+}
+
+.logical-segment-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.5rem;
+    align-items: end;
+    margin-bottom: 0.75rem;
+}
+
+/* ============================================================
+   TEST RUN SCREEN — FIXED NO-SCROLL LAYOUT (1024x600)
+   ============================================================ */
+
+#page-test-run {
+    overflow: hidden !important;
+    padding: 0 !important;
+}
+
+.tr-fixed-layout {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-primary, #0f172a);
+}
+
+/* ---- Run Screen 2-column layout ---- */
+.tr-run-screen {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 46% 54%;
+    gap: 0;
+    padding: 10px 12px;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+/* ===== LEFT PANEL ===== */
+.tr-panel-left {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-right: 12px;
+    border-right: 1px solid rgba(255,255,255,0.08);
+    overflow: hidden;
+}
+
+/* Product + Batch header */
+.tr-product-block {
+    background: linear-gradient(135deg, #1e3a5f 0%, #1e293b 100%);
+    border-radius: 12px;
+    padding: 14px 18px 12px;
+    border: 1px solid rgba(59,130,246,0.25);
+    flex-shrink: 0;
+}
+.tr-product-name {
+    font-size: 22px;
+    font-weight: 800;
+    color: #f1f5f9;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tr-batch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+.tr-batch-label {
+    font-size: 13px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+}
+.tr-batch-val {
+    font-size: 18px;
+    font-weight: 700;
+    color: #93c5fd;
+}
+
+/* Parameter grid — 2×2 */
+.tr-param-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.tr-param-cell {
+    background: var(--bg-card, #1e293b);
+    border-radius: 10px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255,255,255,0.07);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+}
+.tr-param-label {
+    font-size: 12px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+}
+.tr-param-val {
+    font-size: 22px;
+    font-weight: 800;
+    color: #f1f5f9;
+    line-height: 1.1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Status pill */
+.tr-status-pill {
+    background: rgba(34,197,94,0.15);
+    border: 1.5px solid #22c55e;
+    color: #22c55e;
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-align: center;
+    border-radius: 8px;
+    padding: 10px 0;
+    flex-shrink: 0;
+    transition: background 0.3s, color 0.3s, border-color 0.3s;
+}
+.tr-status-pill.status-running {
+    background: rgba(59,130,246,0.18);
+    border-color: #3b82f6;
+    color: #60a5fa;
+}
+.tr-status-pill.status-done {
+    background: rgba(245,158,11,0.15);
+    border-color: #f59e0b;
+    color: #fbbf24;
+}
+
+.tr-footer-note {
+    font-size: 13px;
+    color: #475569;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+/* ===== RIGHT PANEL ===== */
+.tr-panel-right {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding-left: 12px;
+    overflow: hidden;
+}
+
+.tr-svg-wrap {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    width: 100%;
+}
+.tr-sieve-svg {
+    width: auto;
+    max-height: 100%;
+    height: 100%;
+}
+
+/* Timer block */
+.tr-timer-block {
+    width: 100%;
+    background: var(--bg-card, #1e293b);
+    border-radius: 12px;
+    padding: 12px 16px;
+    border: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+}
+.tr-timer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    gap: 8px;
+}
+.tr-timer-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    flex: 1;
+}
+.tr-timer-label {
+    font-size: 11px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+}
+.tr-timer-val {
+    font-size: 36px;
+    font-weight: 800;
+    color: #f1f5f9;
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+.tr-timer-elapsed { color: #34d399; }
+.tr-timer-divider {
+    width: 2px;
+    height: 40px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+.tr-progress-bg {
+    background: rgba(255,255,255,0.08);
+    border-radius: 6px;
+    height: 12px;
+    overflow: hidden;
+    width: 100%;
+}
+.tr-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #06b6d4);
+    border-radius: 6px;
+    transition: width 0.4s ease;
+}
+.tr-progress-text {
+    font-size: 14px;
+    font-weight: 700;
+    color: #94a3b8;
+    text-align: center;
+    margin-top: 4px;
+}
+
+/* Control buttons */
+.tr-btn-row {
+    display: flex;
+    gap: 10px;
+    width: 100%;
+    flex-shrink: 0;
+}
+.tr-btn {
+    flex: 1;
+    padding: 16px 0;
+    border-radius: 10px;
+    font-size: 18px;
+    font-weight: 800;
+    border: none;
+    cursor: pointer;
+    letter-spacing: 0.08em;
+    transition: opacity 0.15s, transform 0.1s;
+}
+.tr-btn:active { transform: scale(0.97); }
+.tr-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.tr-btn-start { background: #22c55e; color: #fff; }
+.tr-btn-start:hover:not(:disabled) { background: #16a34a; }
+.tr-btn-stop  { background: #ef4444; color: #fff; }
+.tr-btn-stop:hover:not(:disabled) { background: #dc2626; }
+
+/* keep old classes for backward compat */
+.tr-elapsed-big { font-size: 22px; font-weight: 700; color: #f1f5f9; }
+.tr-col { display: flex; flex-direction: column; gap: 8px; padding: 0 6px; }
+
+/* ---- SVG ANIMATION ---- */
+@keyframes shakerVibrate {
+    0%   { transform: translateX(0); }
+    20%  { transform: translateX(3px); }
+    40%  { transform: translateX(-3px); }
+    60%  { transform: translateX(2px); }
+    80%  { transform: translateX(-2px); }
+    100% { transform: translateX(0); }
+}
+
+@keyframes vibPulse {
+    0%, 100% { opacity: 0; }
+    50%       { opacity: 1; }
+}
+
+.shaker-animating #tr-shaker-group {
+    animation: shakerVibrate 0.18s linear infinite;
+    transform-origin: 100px 250px;
+}
+
+.shaker-animating .tr-vib-lines {
+    animation: vibPulse 0.9s ease-in-out infinite;
+}
+
+/* ---- SIEVE WEIGHT ENTRY SCREEN ---- */
+.tr-sieve-entry-screen {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 12px 16px;
+    box-sizing: border-box;
+    gap: 10px;
+}
+
+.tr-sieve-entry-header {
+    flex-shrink: 0;
+}
+.tr-sieve-entry-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #f1f5f9;
+    margin: 0 0 2px;
+}
+.tr-sieve-entry-sub {
+    font-size: 12px;
+    color: #94a3b8;
+    margin: 0;
+}
+
+.tr-sieve-weight-grid {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 8px;
+    overflow-y: auto;
+    align-content: start;
+}
+
+.tr-sieve-weight-grid .form-group {
+    background: var(--bg-card, #1e293b);
+    border-radius: 8px;
+    padding: 8px 10px;
+    border: 1px solid rgba(255,255,255,0.07);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+}
+
+.tr-sieve-final-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+.tr-sieve-final-row .tr-wlabel { min-width: 160px; }
+
+.tr-sieve-verdict-row {
+    display: flex;
+    gap: 16px;
+    flex-shrink: 0;
+}
+
+.tr-verdict-btn {
+    flex: 1;
+    padding: 14px 0;
+    font-size: 18px;
+    font-weight: 800;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    letter-spacing: 0.1em;
+    transition: opacity 0.15s;
+}
+.tr-verdict-pass { background: #22c55e; color: #fff; }
+.tr-verdict-pass:hover { background: #16a34a; }
+.tr-verdict-fail { background: #ef4444; color: #fff; }
+.tr-verdict-fail:hover { background: #dc2626; }
+
+/* ============================================================
+   ENLARGED MODALS FOR 7-INCH DISPLAY
+   ============================================================ */
+.modal-overlay .modal-content,
+.modal-overlay .role-modal,
+.modal-overlay .test-run-step-complete-modal,
+.modal-overlay .approval-verify-modal {
+    max-width: 90vw !important;
+    min-width: 70vw;
+    padding: 2rem 2.5rem;
+    font-size: 1.1rem;
+}
+
+.modal-content h3,
+.role-modal h3 {
+    font-size: 1.4rem !important;
+}
+
+.modal-content p,
+.role-modal p {
+    font-size: 1.1rem !important;
+    line-height: 1.5;
+}
+
+.modal-content .modal-buttons button,
+.modal-content .btn,
+.role-modal .btn {
+    font-size: 1.1rem !important;
+    padding: 14px 28px !important;
+    min-height: 48px;
+}
+
+#app-modal-message {
+    font-size: 1.05rem !important;
+    max-height: min(380px, 60vh) !important;
+}
+
+/* ============================================================
+   WEIGHT WIZARD — FULL-SCREEN STEP-BY-STEP
+   ============================================================ */
+.wz-wizard {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    padding: 16px 24px;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.wz-step-indicator {
+    font-size: 13px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+}
+
+.wz-dots {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 16px;
+}
+.wz-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.15);
+    transition: background 0.2s;
+}
+.wz-dot.done { background: #22c55e; }
+.wz-dot.active { background: #3b82f6; box-shadow: 0 0 6px #3b82f6; }
+
+.wz-label {
+    font-size: clamp(18px, 3.5vw, 26px);
+    font-weight: 700;
+    color: #f1f5f9;
+    text-align: center;
+    margin-bottom: 12px;
+}
+
+.wz-instruction {
+    font-size: 14px;
+    color: #94a3b8;
+    text-align: center;
+    margin-bottom: 16px;
+}
+
+.wz-weight-display {
+    font-size: clamp(36px, 8vw, 56px);
+    font-weight: 800;
+    color: #f59e0b;
+    min-height: 70px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    letter-spacing: 0.04em;
+    transition: color 0.3s;
+}
+.wz-weight-display.captured {
+    color: #22c55e;
+}
+
+.wz-buttons {
+    display: flex;
+    gap: 16px;
+    margin-top: 20px;
+}
+.wz-btn {
+    padding: 14px 36px;
+    font-size: 16px;
+    font-weight: 700;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: opacity 0.15s;
+    min-width: 140px;
+}
+.wz-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.wz-btn-next { background: #3b82f6; color: #fff; }
+.wz-btn-next:hover:not(:disabled) { background: #2563eb; }
+.wz-btn-back { background: rgba(255,255,255,0.1); color: #94a3b8; }
+.wz-btn-back:hover { background: rgba(255,255,255,0.15); }
+.wz-btn-start { background: #22c55e; color: #fff; }
+.wz-btn-start:hover { background: #16a34a; }
+
+/* After-test summary table */
+.wz-summary {
+    width: 100%;
+    max-height: 100%;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+}
+.wz-summary-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+.wz-summary-table {
+    width: 100%;
+    max-width: 700px;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.wz-summary-table th,
+.wz-summary-table td {
+    border: 1px solid rgba(255,255,255,0.12);
+    padding: 6px 10px;
+    text-align: center;
+    color: #e2e8f0;
+}
+.wz-summary-table th {
+    background: rgba(255,255,255,0.06);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+}
+.wz-summary-total td { font-weight: 700; border-top: 2px solid rgba(255,255,255,0.2); }
+.wz-verdict-row {
+    display: flex;
+    gap: 20px;
+    margin-top: 12px;
+}
+
+/* ============================================================
+   MICRON PICKER — FULL-SCREEN COLOR BUTTON GRID
+   ============================================================ */
+/* micron-pick-btn base — see full definition below in ASTM Sieve Picker section */
+
+/* ===== ASTM Sieve Picker — Full Screen ===== */
+.micron-picker-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.92);
+    z-index: 9000;
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+}
+.micron-picker-panel {
+    background: var(--bg-card, #1e293b);
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+    border-radius: 0;
+    padding: 0;
+}
+.micron-picker-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #f1f5f9;
+    text-align: center;
+    padding: 16px 20px 12px;
+    background: var(--bg-sidebar, #0f172a);
+    border-bottom: 2px solid #334155;
+    flex-shrink: 0;
+}
+.micron-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    overflow-y: auto;
+    flex: 1;
+    padding: 14px;
+    align-content: start;
+}
+.micron-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 14px 8px;
+    border-radius: 12px;
+    border: 2px solid transparent;
+    background: #334155;
+    color: #f1f5f9;
+    cursor: pointer;
+    transition: transform 0.1s, border-color 0.1s, background 0.15s;
+    text-align: center;
+    min-height: 80px;
+}
+.micron-btn:hover  { background: #475569; border-color: #60a5fa; transform: scale(1.02); }
+.micron-btn:active { transform: scale(0.96); }
+.micron-btn.selected { background: #1d4ed8; border-color: #60a5fa; }
+.mb-mesh   { font-size: 17px; font-weight: 800; color: #f8fafc; line-height: 1.1; }
+.mb-micron { font-size: 14px; font-weight: 600; color: #93c5fd; }
+.micron-picker-cancel {
+    flex-shrink: 0;
+    padding: 18px 0;
+    border: none;
+    border-top: 2px solid #334155;
+    background: #7f1d1d;
+    color: #fff;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    width: 100%;
+    letter-spacing: 0.5px;
+}
+.micron-picker-cancel:hover { background: #ef4444; }
+
+/* Pick button on the form (after selection) */
+.micron-pick-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 64px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 2px solid #334155;
+    background: #1e293b;
+    color: #94a3b8;
+    font-size: 13px;
+    cursor: pointer;
+    width: 100%;
+    text-align: center;
+    transition: border-color 0.15s;
+}
+.micron-pick-btn.selected { border-color: #3b82f6; color: #f1f5f9; background: #1e3a5f; }
+.micron-pick-btn .mb-mesh   { font-size: 15px; font-weight: 700; color: #f1f5f9; }
+.micron-pick-btn .mb-micron { font-size: 13px; font-weight: 600; color: #60a5fa; }
+.micron-pan-fixed {
+    min-height: 64px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 2px solid #334155;
+    background: #0f172a;
+    color: #64748b;
+    font-size: 15px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    cursor: default;
+}
+
+/* Manual weight entry row in wizard */
+.wz-manual-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 10px;
+}
+.wz-manual-input {
+    background: var(--bg-primary, #0f172a);
+    border: 2px solid #3b82f6;
+    border-radius: 8px;
+    color: #f1f5f9;
+    font-size: 20px;
+    font-weight: 700;
+    padding: 10px 16px;
+    width: 180px;
+    text-align: center;
+}
+
+#report-html-preview {
+    width: 100%;
+    max-width: 100%;
+    background: #fff;
+    color: #000;
+    padding: 0;
+    margin: 0 auto;
+    display: none;
 }

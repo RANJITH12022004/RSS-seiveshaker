@@ -1,84 +1,88 @@
 #!/usr/bin/env python3
 """
-calculation_service.py - Friability Tester recipe validation and form processing.
+calculation_service.py - Sieve Shaker CFR recipe validation and form processing.
 """
 
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 def init():
     pass
 
 
+def _parse_positive_int(val, field_name: str, min_val: int = 1) -> int:
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {field_name}")
+    if n < min_val:
+        raise ValueError(f"{field_name} must be at least {min_val}")
+    return n
+
+
+def _validate_logical_segments(segments: List[Dict[str, Any]]) -> List[str]:
+    errors = []
+    if not segments:
+        errors.append("At least one logical segment is required")
+        return errors
+    has_run = False
+    for i, seg in enumerate(segments):
+        seg_type = str(seg.get("type") or "").strip().lower()
+        if seg_type not in ("run", "wait"):
+            errors.append(f"Segment {i + 1}: type must be run or wait")
+            continue
+        if seg_type == "run":
+            has_run = True
+        try:
+            _parse_positive_int(seg.get("durationSeconds"), f"Segment {i + 1} duration")
+        except ValueError as e:
+            errors.append(str(e))
+    if not has_run:
+        errors.append("Logical program must include at least one run segment")
+    return errors
+
+
 def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Validate friability recipe.
-    Required: productName, drumCount (1|2), speed (RPM).
-    Batch number is collected when loading a recipe for a test run.
-    USP mode: 25 RPM, 4 min, 100 rotations.
-    Custom mode: COUNT -> tabletCount; TIME -> timeMinutes.
-    Returns { "valid": bool, "error": str }.
+    Validate sieve shaker recipe.
+    Required: productName, shakerMode, amplitude (5-30).
     """
     errors = []
     name = (recipe_data.get("productName") or recipe_data.get("name") or "").strip()
     if not name:
         errors.append("Product name is required")
 
+    shaker_mode = str(recipe_data.get("shakerMode") or "").strip().upper()
+    if shaker_mode not in ("CONTINUOUS", "INTERMITTENT", "LOGICAL"):
+        errors.append("Shaker mode must be Continuous, Intermittent, or Logical")
+
     try:
-        drum_count = int(recipe_data.get("drumCount", 2))
-        if drum_count not in (1, 2):
-            errors.append("Drum count must be 1 or 2")
+        amp = int(recipe_data.get("amplitude"))
+        if amp < 5 or amp > 30:
+            errors.append("Amplitude must be between 5 and 30")
     except (TypeError, ValueError):
-        errors.append("Invalid drum count")
+        errors.append("Amplitude is required (5-30)")
 
-    mode = str(recipe_data.get("uspMode") or recipe_data.get("usp") or "").strip().upper()
-    if "CUSTOM" in mode:
-        mode = "CUSTOM"
-    else:
-        mode = "USP"
-
-    speed = recipe_data.get("speed")
-    if mode == "USP":
-        speed = 25
-    else:
+    if shaker_mode in ("CONTINUOUS", "INTERMITTENT"):
         try:
-            speed = int(speed)
-            if speed < 20 or speed > 70:
-                errors.append("Speed must be between 20 and 70 RPM")
-        except (TypeError, ValueError):
-            errors.append("Speed (RPM) is required for custom mode")
+            _parse_positive_int(recipe_data.get("durationSeconds"), "Duration")
+        except ValueError as e:
+            errors.append(str(e))
 
-    completion = str(recipe_data.get("customCompletionMode") or "COUNT").strip().upper()
-    if mode == "USP":
-        completion = "TIME"
-    if completion == "TIME":
-        ts = recipe_data.get("timeSeconds") or recipe_data.get("targetSeconds")
-        tm = recipe_data.get("timeMinutes")
-        if ts is None and tm is None:
-            errors.append("Time (MM:SS) is required when completion mode is Time")
-        else:
-            try:
-                seconds = int(float(ts)) if ts is not None else int(round(float(tm) * 60))
-                if seconds < 1:
-                    errors.append("Time (MM:SS) must be at least 00:01")
-            except (TypeError, ValueError):
-                errors.append("Invalid time (MM:SS)")
-    else:
-        count = recipe_data.get("tabletCount")
-        if count is None and recipe_data.get("customTotalTaps") is not None:
-            count = recipe_data.get("customTotalTaps")
-        if mode == "USP":
-            count = 100
-        elif count is None:
-            errors.append("Rotation count is required when completion mode is Count")
-        else:
-            try:
-                n = int(count)
-                if n < 1 or n > 10000:
-                    errors.append("Rotation count must be between 1 and 10000")
-            except (TypeError, ValueError):
-                errors.append("Invalid rotation count")
+    if shaker_mode == "INTERMITTENT":
+        try:
+            _parse_positive_int(recipe_data.get("intermittentOnSeconds"), "On time")
+        except ValueError as e:
+            errors.append(str(e))
+        try:
+            _parse_positive_int(recipe_data.get("intermittentOffSeconds"), "Off time")
+        except ValueError as e:
+            errors.append(str(e))
+
+    if shaker_mode == "LOGICAL":
+        segments = recipe_data.get("logicalSegments") or []
+        errors.extend(_validate_logical_segments(segments))
 
     if errors:
         return {"valid": False, "error": "; ".join(errors)}
@@ -88,6 +92,20 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
 def process_recipe_form_data(form_data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize recipe form data for storage."""
     recipe = dict(form_data)
+    recipe["shakerMode"] = str(recipe.get("shakerMode") or "CONTINUOUS").strip().upper()
+    if recipe.get("amplitude") is not None:
+        recipe["amplitude"] = int(recipe["amplitude"])
+    for key in ("durationSeconds", "intermittentOnSeconds", "intermittentOffSeconds"):
+        if recipe.get(key) is not None:
+            recipe[key] = int(recipe[key])
+    if recipe.get("logicalSegments"):
+        normalized = []
+        for seg in recipe["logicalSegments"]:
+            normalized.append({
+                "type": str(seg.get("type") or "run").strip().lower(),
+                "durationSeconds": int(seg.get("durationSeconds") or 0),
+            })
+        recipe["logicalSegments"] = normalized
     if "createdAt" not in recipe:
         recipe["createdAt"] = datetime.utcnow().isoformat() + "Z"
     if "lastUsed" not in recipe:

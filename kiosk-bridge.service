@@ -1,5 +1,5 @@
 [Unit]
-Description=Friability Tester kiosk API (Flask)
+Description=Sieve Shaker CFR kiosk API (Flask)
 After=network-online.target local-fs.target
 Wants=network-online.target
 # Prevent legacy bridge.service from racing for port 5000 after power cycles.

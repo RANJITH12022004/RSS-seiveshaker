@@ -1,0 +1,70 @@
+# ESP Command Spec — Sieve Shaker CFR (RSS-2B AC Dimmer)
+
+Serial ASCII protocol between the Raspberry Pi (Sieve Shaker CFR kiosk) and the AC dimmer MCU.
+Derived from RSS-2B AC DIMMER FINAL CODE.txt.
+
+## Transport / framing
+
+- **Pi -> ESP commands** are exactly **4 ASCII characters** followed by newline (`\n`).
+- **Do not** append `*` — unlike Tap Density / Friability firmware.
+- **ESP -> Pi replies** are ASCII lines terminated by newline (`\n`).
+- During a run the ESP sends **no progress lines**. Only stop (`#00C` / `#00I`) yields `OK`.
+
+## Command frame format
+
+```text
+#NNM
+```
+
+| Char | Meaning |
+|------|---------|
+| `#` | Frame start (also restarts buffer on ESP) |
+| `NN` | Two-digit amplitude: `00` = off, `05`–`30` = run level |
+| `M` | Mode: `C`/`c` = continuous, `I`/`i` = intermittent (soft-start) |
+
+Examples:
+
+- `#15C` — continuous at amplitude 15
+- `#05I` — intermittent at amplitude 5
+- `#00C` — stop continuous (ESP replies `OK`)
+- `#00I` — stop intermittent (ESP replies `OK`)
+
+## Amplitude
+
+Valid run amplitudes: **5 through 30** (inclusive).
+
+Amplitude maps to AC dimming level inside firmware (`dimmingValues[]`).
+
+## Pi-side program logic
+
+The Pi owns all timing:
+
+- **Continuous**: send `#NNC`, run until duration elapses or operator completes, then `#00C`.
+- **Intermittent**: alternate `#NNI` and `#00I` using user on/off intervals until total duration or manual stop.
+- **Logical**: iterate user-defined run/wait segments; run segments use `#NNC`, wait segments keep shaker off.
+
+## Expected replies
+
+| Action | ESP reply |
+|--------|-----------|
+| Start (`#NNC` / `#NNI`, NN > 0) | *(none)* |
+| Stop (`#00C` / `#00I`) | `OK` |
+
+## Example transcript — continuous run
+
+**Pi -> ESP**
+```text
+#15C
+```
+
+*(shaker runs — no lines)*
+
+**Pi -> ESP**
+```text
+#00C
+```
+
+**ESP -> Pi**
+```text
+OK
+```

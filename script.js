@@ -1,4 +1,4 @@
-// Friability Tester - navigation + API
+// Sieve Shaker CFR - navigation + API
 document.addEventListener('wheel', function (e) { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
 document.addEventListener('keydown', function (e) {
     if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '0' || e.key === '=')) e.preventDefault();
@@ -1517,7 +1517,7 @@ function _updateCreateStepsPageUspUi() {
 }
 
 var PAGE_TITLES = {
-    'home': 'Friability Tester',
+    'home': 'Sieve Shaker',
     'quick-test': 'Quick Test',
     'quick-test-steps': 'Quick Test — Steps',
     'create-recipe-step1': 'Create Recipe',
@@ -2114,7 +2114,8 @@ function goToPage(pageName) {
     }
     if (pageName === 'quick-test') {
         setTimeout(function () {
-            if (typeof applyQuickRecipeModeToFields === 'function') applyQuickRecipeModeToFields();
+            if (typeof applyQuickShakerModeToFields === 'function') applyQuickShakerModeToFields();
+            if (typeof renderSieveSizeFields === 'function') renderSieveSizeFields('quick');
         }, 50);
     }
     if (pageName === 'disable-recipes') {
@@ -2127,9 +2128,10 @@ function goToPage(pageName) {
         setTimeout(function () {
             if (window.currentEditingRecipeId && typeof loadRecipeForEdit === 'function') {
                 loadRecipeForEdit();
-            } else if (typeof applyRecipeModeToFields === 'function') {
-                applyRecipeModeToFields();
+            } else if (typeof applyRecipeShakerModeToFields === 'function') {
+                applyRecipeShakerModeToFields();
             }
+            if (typeof renderSieveSizeFields === 'function') renderSieveSizeFields('recipe');
         }, 50);
     }
     if (pageName === 'create-recipe-step2') {
@@ -4689,6 +4691,10 @@ function selectOperation(type) {
 }
 
 function startValidationFromType() {
+    if (typeof startShakerValidation === 'function') {
+        startShakerValidation();
+        return;
+    }
     if (!userCanRunValidation()) {
         denyPermission('run validation');
         return;
@@ -6032,12 +6038,27 @@ function populateReportPreview(preview) {
     if (!preview) return;
     var a4Text = preview.a4Text;
     var useA4 = !!(a4Text && String(a4Text).trim());
+    var a4Pre = document.getElementById('report-a4-text-preview');
+    var legacy = document.getElementById('report-legacy-preview');
+    var htmlDiv = document.getElementById('report-html-preview');
 
-    if (useA4) {
+    if (preview.isSieveShaker && preview.htmlPreview) {
+        if (!htmlDiv) {
+            htmlDiv = document.createElement('div');
+            htmlDiv.id = 'report-html-preview';
+            if (a4Pre) a4Pre.parentNode.insertBefore(htmlDiv, a4Pre);
+            else if (legacy) legacy.parentNode.appendChild(htmlDiv);
+        }
+        htmlDiv.innerHTML = preview.htmlPreview;
+        htmlDiv.style.display = 'block';
+        if (a4Pre) a4Pre.style.display = 'none';
+        if (legacy) legacy.style.display = 'none';
+    } else if (useA4) {
+        if (htmlDiv) htmlDiv.style.display = 'none';
         _setReportPreviewDisplayMode('a4');
-        var a4Pre = document.getElementById('report-a4-text-preview');
         if (a4Pre) a4Pre.textContent = a4Text;
     } else {
+        if (htmlDiv) htmlDiv.style.display = 'none';
         _setReportPreviewDisplayMode('legacy');
         _populateLegacyReportPreview(preview);
     }
@@ -7513,6 +7534,7 @@ window.trStartTest = trStartTest;
 window.trPauseTest = trPauseTest;
 window.trResumeTest = trResumeTest;
 window.trStopTest = trStopTest;
+window.trCompleteTest = typeof trCompleteTest === 'function' ? trCompleteTest : function () {};
 window.trDispenseTest = trDispenseTest;
 window.trExitTestRun = trExitTestRun;
 
@@ -7631,7 +7653,7 @@ function approveSavedRecipeWithCredentials(recipeId, modalTitle, remarks) {
     }).catch(function (err) {
         var msg = err && err.message ? String(err.message) : 'Error';
         if (msg.toLowerCase() === 'forbidden') {
-            msg += ' — restart the Friability Tester server after updating, or hard-refresh the page (cached UI).';
+            msg += ' — restart the Sieve Shaker CFR server after updating, or hard-refresh the page (cached UI).';
         }
         showAppModal('Approval failed: ' + msg, title);
         return { ok: false };
@@ -7791,8 +7813,10 @@ function openBatchNumberModal() {
     var titleEl = overlay ? overlay.querySelector('.param-config-modal-title') : null;
     var labelEl = overlay ? overlay.querySelector('.form-group label') : null;
     if (!pendingRecipeLoadContext) {
-        var drumCount = parseInt((pendingRecipeToLoad && pendingRecipeToLoad.drumCount), 10);
-        if (drumCount !== 1) drumCount = 2;
+        // Sieve shaker recipes use a single batch (no drum concept)
+        var isSieveRecipe = !!(pendingRecipeToLoad && (pendingRecipeToLoad.numSieves != null || pendingRecipeToLoad.shakerMode));
+        var drumCount = isSieveRecipe ? 1 : parseInt((pendingRecipeToLoad && pendingRecipeToLoad.drumCount), 10);
+        if (!isSieveRecipe && drumCount !== 1) drumCount = 2;
         pendingRecipeLoadContext = {
             drumCount: drumCount,
             step: 1,
@@ -7803,9 +7827,10 @@ function openBatchNumberModal() {
         };
     }
     var ctx = pendingRecipeLoadContext;
-    var drumLabel = (ctx && ctx.drumCount === 2) ? ('Drum ' + ctx.step) : 'Drum 1';
-    if (titleEl) titleEl.textContent = 'Enter Batch Number (' + drumLabel + ')';
-    if (labelEl) labelEl.textContent = 'Batch Number (' + drumLabel + ')';
+    var isSieveBatch = !!(pendingRecipeToLoad && (pendingRecipeToLoad.numSieves != null || pendingRecipeToLoad.shakerMode));
+    var drumLabel = isSieveBatch ? '' : ((ctx && ctx.drumCount === 2) ? (' (Drum ' + ctx.step + ')') : ' (Drum 1)');
+    if (titleEl) titleEl.textContent = 'Enter Batch Number' + drumLabel;
+    if (labelEl) labelEl.textContent = 'Batch Number' + drumLabel;
     if (overlay) overlay.style.display = 'flex';
     if (input) {
         if (ctx && ctx.step === 2) input.value = ctx.batchNumber2 || '';
@@ -7879,9 +7904,11 @@ function confirmBatchNumberAndLoad() {
     var recipe = Object.assign({}, pendingRecipeToLoad);
     var overlay = document.getElementById('batch-number-modal');
     if (overlay) overlay.style.display = 'none';
+    var isSieveRecipe2 = !!(recipe && (recipe.numSieves != null || recipe.shakerMode));
     if (ctx.drumCount === 1) {
         ctx.batchNumber1 = batch;
-        if (ctx.initialWeight1 == null) {
+        // Sieve shaker handles initial weight via wizard — skip initial weight prompt
+        if (!isSieveRecipe2 && ctx.initialWeight1 == null) {
             promptNumberModal({
                 title: 'Initial Weight - Drum 1',
                 message: 'Enter the initial weight for Drum 1.',
@@ -7899,6 +7926,7 @@ function confirmBatchNumberAndLoad() {
             });
             return;
         }
+        // For sieve shaker or when weight already provided, go straight to test run
         _finalizeRecipeLoad(recipe, ctx);
         return;
     }
@@ -8081,20 +8109,18 @@ function loadManageRecipes() {
                 if (mode === 'load') {
                     headRow.innerHTML =
                         '<th>Product Name</th>' +
-                        '<th>Test Mode</th>' +
-                        '<th>RPM</th>' +
-                        '<th>Time</th>' +
-                        '<th>Rotations</th>' +
-                        '<th>Drums</th>' +
+                        '<th>Shaker Mode</th>' +
+                        '<th>Amplitude</th>' +
+                        '<th>Duration</th>' +
+                        '<th>Sieves</th>' +
                         '<th class="actions-col">Load</th>';
                 } else {
                     headRow.innerHTML =
                         '<th>Product Name</th>' +
-                        '<th>Test Mode</th>' +
-                        '<th>RPM</th>' +
-                        '<th>Time</th>' +
-                        '<th>Rotations</th>' +
-                        '<th>Drums</th>' +
+                        '<th>Shaker Mode</th>' +
+                        '<th>Amplitude</th>' +
+                        '<th>Duration</th>' +
+                        '<th>Sieves</th>' +
                         '<th>Approval</th>' +
                         '<th class="actions-col">Actions</th>';
                 }
@@ -8121,21 +8147,19 @@ function loadManageRecipes() {
         recipes.forEach(function (r) {
             var tr = document.createElement('tr');
             var name = r.productName || r.name || '--';
-            var modeLabel = recipeTestModeLabel(r);
-            var rpmStr = recipeRpm(r) != null ? String(recipeRpm(r)) : '--';
+            var modeLabel = r.shakerMode || recipeTestModeLabel(r) || '--';
+            var ampStr = r.amplitude != null ? String(r.amplitude) : '--';
             var timeStr = recipeTimeDisplay(r);
-            var rotStr = recipeRotationsDisplay(r);
-            var drumStr = recipeDrumCountDisplay(r);
+            var sieveStr = r.numSieves != null ? String(r.numSieves) : '--';
 
             if (mode === 'load') {
                 var loadBtnHtml = '<button type="button" class="btn-action btn-load" onclick="loadRecipeById(' + (r.id || 0) + ')" title="Load">Load</button>';
                 tr.innerHTML =
                     '<td>' + name + '</td>' +
                     '<td>' + modeLabel + '</td>' +
-                    '<td>' + rpmStr + '</td>' +
+                    '<td>' + ampStr + '</td>' +
                     '<td>' + timeStr + '</td>' +
-                    '<td>' + rotStr + '</td>' +
-                    '<td>' + drumStr + '</td>' +
+                    '<td>' + sieveStr + '</td>' +
                     '<td class="actions-cell actions-col">' + loadBtnHtml + '</td>';
             } else {
                 var appr = getEffectiveRecipeApprovalStatus(r);
@@ -8146,10 +8170,9 @@ function loadManageRecipes() {
                 tr.innerHTML =
                     '<td>' + name + '</td>' +
                     '<td>' + modeLabel + '</td>' +
-                    '<td>' + rpmStr + '</td>' +
+                    '<td>' + ampStr + '</td>' +
                     '<td>' + timeStr + '</td>' +
-                    '<td>' + rotStr + '</td>' +
-                    '<td>' + drumStr + '</td>' +
+                    '<td>' + sieveStr + '</td>' +
                     '<td>' + apprLabel + '</td>' +
                     '<td class="actions-cell">' + actionsBtnHtml + '</td>';
             }
@@ -9822,6 +9845,7 @@ function setFactorySettingsForm(settings) {
         ['factory-max-users', 'maxUsers'],
         ['factory-max-admins', 'maxAdmins'],
         ['factory-max-supervisors', 'maxSupervisors'],
+        ['factory-max-qa', 'maxQa'],
         ['factory-password-reset-days', 'passwordResetPeriodDays'],
         ['factory-auto-logout-minutes', 'autoLogoutMinutes']
     ];
@@ -9837,6 +9861,7 @@ function setFactorySettingsForm(settings) {
         else if (pair[1] === 'maxUsers') el.value = String(val || 10);
         else if (pair[1] === 'maxAdmins') el.value = String(val || 2);
         else if (pair[1] === 'maxSupervisors') el.value = String(val || 3);
+        else if (pair[1] === 'maxQa') el.value = String(val || 3);
         else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
         else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
         else el.value = val || '';
@@ -9867,6 +9892,7 @@ function saveFactorySettings() {
     var maxUsersEl = document.getElementById('factory-max-users');
     var maxAdminsEl = document.getElementById('factory-max-admins');
     var maxSupervisorsEl = document.getElementById('factory-max-supervisors');
+    var maxQaEl = document.getElementById('factory-max-qa');
     var passwordResetDaysEl = document.getElementById('factory-password-reset-days');
     var autoLogoutEl = document.getElementById('factory-auto-logout-minutes');
     var biometricEnabledEl = document.getElementById('factory-biometric-enabled');
@@ -9881,6 +9907,7 @@ function saveFactorySettings() {
     var maxUsers = Math.max(1, Math.min(999, parseInt(maxUsersEl && maxUsersEl.value ? maxUsersEl.value : 10, 10)));
     var maxAdmins = Math.max(1, Math.min(99, parseInt(maxAdminsEl && maxAdminsEl.value ? maxAdminsEl.value : 2, 10)));
     var maxSupervisors = Math.max(1, Math.min(99, parseInt(maxSupervisorsEl && maxSupervisorsEl.value ? maxSupervisorsEl.value : 3, 10)));
+    var maxQa = Math.max(1, Math.min(99, parseInt(maxQaEl && maxQaEl.value ? maxQaEl.value : 3, 10)));
     var passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt(passwordResetDaysEl && passwordResetDaysEl.value ? passwordResetDaysEl.value : 30, 10)));
     var autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt(autoLogoutEl && autoLogoutEl.value !== '' ? autoLogoutEl.value : '0', 10)));
     if (isNaN(autoLogoutMinutes)) autoLogoutMinutes = 0;
@@ -9898,6 +9925,7 @@ function saveFactorySettings() {
         maxUsers: maxUsers,
         maxAdmins: maxAdmins,
         maxSupervisors: maxSupervisors,
+        maxQa: maxQa,
         passwordResetPeriodDays: passwordResetPeriodDays,
         autoLogoutMinutes: autoLogoutMinutes,
         biometricEnabled: normalizeBiometricEnabled(biometricEnabledEl ? biometricEnabledEl.value : true)
@@ -10091,7 +10119,7 @@ function verifyValidationAdapter() {
 }
 
 function showValidationAdapterCheckModal() {
-    showAppModal('Adapter check is not used on the Friability Tester.', 'Validation');
+    showAppModal('Adapter check is not used on the Sieve Shaker CFR.', 'Validation');
 }
 
 function bindTestRunDecimalInputs() {

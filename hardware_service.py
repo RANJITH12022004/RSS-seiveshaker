@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hardware_service.py - Serial communication to MCU for Friability Tester.
+hardware_service.py - Serial communication to MCU for Sieve Shaker CFR (RSS-2B AC dimmer).
 """
 
 import errno
@@ -34,16 +34,26 @@ _uart_log_lock = threading.Lock()
 _live_state_lock = threading.Lock()
 _uart_log_path = ""
 _boot_marker_path = ""
-_uart_owner_lock_path = "/tmp/friability_uart_owner.lock"
+_uart_owner_lock_path = "/tmp/shaker_uart_owner.lock"
 _uart_owner_lock_fd = None
 _hardware_init_done = False
 _hardware_owner_active = False
 DEFAULT_UART_LOG = "/opt/kiosk/uart_communications.log"
+SHAKER_AMPLITUDE_MIN = 5
+SHAKER_AMPLITUDE_MAX = 30
 _live_state = {
     "running": False,
-    "rotationCount": 0,
-    "rpm": None,
-    "targetRpm": None,
+    "amplitude": None,
+    "mode": None,
+    "shakerMode": None,
+    "phase": "off",
+    "segmentIndex": 0,
+    "segmentCount": 0,
+    "elapsedSec": 0,
+    "targetDurationSec": 0,
+    "remainingSec": 0,
+    "completedEarly": False,
+    "programDone": False,
     "lastLine": None,
     "updatedAt": None,
 }
@@ -1097,3 +1107,164 @@ def reset_uart_log(reason: str = "manual"):
         return {"ok": True, "path": path}
     except Exception as e:
         return {"ok": False, "error": str(e), "path": path}
+
+
+# ======================= SIEVE SHAKER (RSS-2B) =======================
+
+
+def _normalize_hw_mode(mode: str) -> str:
+    m = str(mode or "C").strip().upper()
+    return "I" if m in ("I", "INTERMITTENT") else "C"
+
+
+def _format_shaker_frame(amplitude: int, mode: str) -> str:
+    hw_mode = _normalize_hw_mode(mode)
+    try:
+        amp = int(amplitude)
+    except (TypeError, ValueError):
+        amp = 0
+    amp = max(0, min(SHAKER_AMPLITUDE_MAX, amp))
+    return f"#{amp:02d}{hw_mode}"
+
+
+def update_shaker_live_state(**kwargs) -> None:
+    with _live_state_lock:
+        _live_state.update(kwargs)
+        _live_state["updatedAt"] = time.time()
+
+
+def reset_shaker_live_state(**kwargs) -> None:
+    with _live_state_lock:
+        _live_state.update({
+            "running": False,
+            "amplitude": kwargs.get("amplitude"),
+            "mode": kwargs.get("mode"),
+            "shakerMode": kwargs.get("shakerMode"),
+            "phase": "off",
+            "segmentIndex": 0,
+            "segmentCount": kwargs.get("segmentCount", 0),
+            "elapsedSec": 0,
+            "targetDurationSec": kwargs.get("targetDurationSec", 0),
+            "remainingSec": kwargs.get("targetDurationSec", 0),
+            "completedEarly": False,
+            "programDone": False,
+            "lastLine": None,
+            "updatedAt": time.time(),
+        })
+
+
+def stop_shaker_live_state() -> None:
+    with _live_state_lock:
+        _live_state["running"] = False
+        _live_state["phase"] = "off"
+        _live_state["updatedAt"] = time.time()
+
+
+def send_shaker_frame(
+    amplitude: int,
+    mode: str = "C",
+    *,
+    wait_ok: bool = False,
+    timeout: float = 2.0,
+) -> Dict[str, Any]:
+    """Send raw 4-char shaker frame (#NNC / #NNI) + newline. Optionally wait for OK on stop."""
+    frame = _format_shaker_frame(amplitude, mode)
+    _append_uart_log("TX", frame)
+
+    if not serial:
+        if wait_ok or amplitude == 0:
+            return {
+                "ok": True,
+                "response": "OK",
+                "normalized": "ok",
+                "kind": "ok",
+                "cmd": frame,
+                "placeholder": True,
+            }
+        return {"ok": True, "cmd": frame, "placeholder": True}
+
+    for attempt in range(MAX_RETRIES):
+        if not esp_ser or not getattr(esp_ser, "is_open", False):
+            try:
+                _open_esp_serial()
+            except Exception as e:
+                if attempt == MAX_RETRIES - 1:
+                    if wait_ok or amplitude == 0:
+                        return {
+                            "ok": True,
+                            "response": "OK",
+                            "normalized": "ok",
+                            "kind": "ok",
+                            "cmd": frame,
+                            "placeholder": True,
+                        }
+                    return {"ok": False, "error": str(e), "cmd": frame}
+                time.sleep(0.2)
+                continue
+        try:
+            with ser_lock:
+                if esp_ser and esp_ser.is_open:
+                    esp_ser.write((frame + "\n").encode("ascii", errors="replace"))
+                    esp_ser.flush()
+            if not wait_ok:
+                return {"ok": True, "cmd": frame, "kind": "sent"}
+            deadline = time.time() + max(0.5, float(timeout or 2.0))
+            while time.time() < deadline:
+                try:
+                    line = line_q.get(timeout=0.1)
+                    if line and line.strip():
+                        raw = line.strip()
+                        _append_uart_log("RX", raw)
+                        norm = normalize_line(raw).lower()
+                        if norm == "ok":
+                            payload = build_line_payload(raw)
+                            update_shaker_live_state(lastLine=raw)
+                            return {
+                                "ok": True,
+                                "response": raw,
+                                "normalized": norm,
+                                "kind": "ok",
+                                "cmd": frame,
+                                **payload,
+                            }
+                except queue.Empty:
+                    pass
+            if attempt == MAX_RETRIES - 1:
+                return {"ok": False, "error": "Timeout waiting for OK", "cmd": frame}
+        except Exception as e:
+            if attempt == MAX_RETRIES - 1:
+                return {"ok": False, "error": str(e), "cmd": frame}
+            time.sleep(0.2)
+    return {"ok": False, "error": "send failed", "cmd": frame}
+
+
+def cmd_shaker_start(amplitude: int, mode: str = "C") -> Dict[str, Any]:
+    try:
+        amp = int(amplitude)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid amplitude"}
+    if amp < SHAKER_AMPLITUDE_MIN or amp > SHAKER_AMPLITUDE_MAX:
+        return {
+            "ok": False,
+            "error": f"amplitude must be between {SHAKER_AMPLITUDE_MIN} and {SHAKER_AMPLITUDE_MAX}",
+        }
+    hw_mode = _normalize_hw_mode(mode)
+    result = send_shaker_frame(amp, hw_mode, wait_ok=False)
+    if result.get("ok"):
+        update_shaker_live_state(running=True, amplitude=amp, mode=hw_mode, phase="run")
+    return result
+
+
+def cmd_shaker_stop(mode: str = "C") -> Dict[str, Any]:
+    hw_mode = _normalize_hw_mode(mode)
+    last_result: Dict[str, Any] = {"ok": False, "error": "stop not acknowledged"}
+    for attempt in range(10):
+        result = send_shaker_frame(0, hw_mode, wait_ok=True, timeout=1.5)
+        last_result = result
+        if result.get("ok"):
+            stop_shaker_live_state()
+            return result
+        time.sleep(0.2)
+    stop_shaker_live_state()
+    return last_result
+
