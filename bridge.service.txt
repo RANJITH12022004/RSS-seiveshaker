@@ -1,0 +1,14 @@
+[Unit]
+Description=DEPRECATED duplicate of kiosk-bridge.service — do not enable
+Documentation=file:///opt/kiosk/kiosk-bridge.service
+# Kept only so old installs do not silently re-enable a second bridge.py on port 5000.
+Conflicts=kiosk-bridge.service
+After=network.target local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
