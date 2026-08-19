@@ -7513,6 +7513,7 @@ window.trStartTest = trStartTest;
 window.trPauseTest = trPauseTest;
 window.trResumeTest = trResumeTest;
 window.trStopTest = trStopTest;
+window.trCompleteTest = typeof trCompleteTest === 'function' ? trCompleteTest : function () {};
 window.trDispenseTest = trDispenseTest;
 window.trExitTestRun = trExitTestRun;
 
