@@ -18,7 +18,12 @@ def main():
         "ESP_BAUD": int(os.environ.get("ESP_BAUD", "9600")),
         "UART_LOG_PATH": os.path.join(os.path.dirname(os.path.dirname(__file__)), "uart_communications.log"),
     })
-    time.sleep(0.5)
+    time.sleep(0.3)
+    if os.environ.get("SHAKER_PROBE_SKIP_HW") == "1":
+        print("SKIP_HW=1 — testing frame format only")
+        print(hardware_service._format_shaker_frame(5, "C"))
+        print(hardware_service._format_shaker_frame(0, "C"))
+        return 0
     print("TX #05C")
     start = hardware_service.cmd_shaker_start(5, "C")
     print("Start:", start)

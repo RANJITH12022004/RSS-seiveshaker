@@ -1258,8 +1258,8 @@ def cmd_shaker_start(amplitude: int, mode: str = "C") -> Dict[str, Any]:
 def cmd_shaker_stop(mode: str = "C") -> Dict[str, Any]:
     hw_mode = _normalize_hw_mode(mode)
     last_result: Dict[str, Any] = {"ok": False, "error": "stop not acknowledged"}
-    for attempt in range(5):
-        result = send_shaker_frame(0, hw_mode, wait_ok=True, timeout=3.0)
+    for attempt in range(3):
+        result = send_shaker_frame(0, hw_mode, wait_ok=True, timeout=1.5)
         last_result = result
         if result.get("ok"):
             stop_shaker_live_state()
