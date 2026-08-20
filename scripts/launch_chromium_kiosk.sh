@@ -71,7 +71,7 @@ wait_for_kiosk_assets() {
 }
 
 chrome_running() {
-  pgrep -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1
+  pgrep -f -- "$CHROME_BIN.*--kiosk.*${KIOSK_URL%/}" >/dev/null 2>&1
 }
 
 # If API drops after power flaps, kill Chromium so the outer loop can reopen a healthy page.
@@ -84,9 +84,9 @@ watch_api_and_recycle_chrome() {
       down=$((down + 1))
       if (( down >= 3 )) && chrome_running; then
         echo "launch_chromium_kiosk: API unreachable; recycling Chromium" >&2
-        pkill -TERM -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1 || true
+        pkill -TERM -f -- "$CHROME_BIN.*--kiosk.*${KIOSK_URL%/}" >/dev/null 2>&1 || true
         sleep 1
-        pkill -KILL -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1 || true
+        pkill -KILL -f -- "$CHROME_BIN.*--kiosk.*${KIOSK_URL%/}" >/dev/null 2>&1 || true
         down=0
       fi
     fi
@@ -126,6 +126,6 @@ while true; do
     --disable-features=TranslateUI \
     --ozone-platform="${OZONE_PLATFORM}" \
     --window-size="${DISPLAY_WIDTH},${DISPLAY_HEIGHT}" \
-    --app="${KIOSK_URL%/}" || true
+    "${KIOSK_URL%/}" || true
   sleep 1
 done

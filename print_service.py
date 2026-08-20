@@ -1564,6 +1564,99 @@ def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -
     return "\n".join(_compact_thermal_lines(flat, width))
 
 
+def _build_friability_test_info(
+    recipe: Dict[str, Any], td: Dict[str, Any], report_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Build friability-specific test info fields (does NOT use sieve shaker derived)."""
+    recipe = recipe if isinstance(recipe, dict) else {}
+    td = td if isinstance(td, dict) else {}
+    report_data = report_data if isinstance(report_data, dict) else {}
+
+    # Test type: Friability
+    test_type = "Friability"
+
+    # Test method: from recipe uspMode / customCompletionMode
+    mode_raw = str(recipe.get("uspMode") or td.get("uspMode") or "").strip().upper()
+    completion = str(recipe.get("customCompletionMode") or td.get("customCompletionMode") or "COUNT").strip().upper()
+    if mode_raw == "USP":
+        test_method = "USP"
+    elif mode_raw == "CUSTOM":
+        test_method = completion  # "COUNT" or "TIME"
+    else:
+        test_method = completion or "--"
+
+    # RPM / speed
+    rpm = _recipe_rpm(recipe) or td.get("rpm") or td.get("speed")
+
+    # Rotations / taps
+    rotations = None
+    for key in ("rotationCount", "completedRotations", "actualRotationCount", "actualTapCount"):
+        v = td.get(key)
+        if v not in (None, ""):
+            rotations = v
+            break
+    if rotations is None:
+        rotations = _recipe_rotations(recipe)
+
+    # Drum count
+    drum_count = td.get("drumCount") or recipe.get("drumCount")
+
+    # Duration
+    dur_sec = test_duration_seconds(td)
+    if dur_sec is None:
+        try:
+            dur_sec = int(recipe.get("durationSeconds") or recipe.get("timeSeconds") or 0) or None
+        except (TypeError, ValueError):
+            dur_sec = None
+    duration_formatted = format_duration_hhmmss(dur_sec) if dur_sec else "--"
+
+    # Test number
+    report_id = report_data.get("id")
+    test_no = "--"
+    if report_id is not None:
+        try:
+            test_no = f"{int(report_id):04d}"
+        except (TypeError, ValueError):
+            test_no = str(report_id)
+
+    return {
+        "testType": test_type,
+        "testMethod": test_method,
+        "rpm": _cell_str(rpm),
+        "rotationCount": _cell_str(rotations),
+        "drumCount": _cell_str(drum_count),
+        "durationFormatted": duration_formatted,
+        "testNumber": test_no,
+    }
+
+
+def _append_friability_statistics(
+    lines: list, td: Dict[str, Any], report_data: Dict[str, Any], width: int, thermal: bool
+) -> None:
+    """Append the STATISTICS block for friability reports (matches on-screen preview)."""
+    stats = None
+    if isinstance(td, dict):
+        stats = td.get("statistics")
+    if not stats and isinstance(report_data, dict):
+        stats = report_data.get("statistics")
+    if not isinstance(stats, dict) or not stats:
+        return
+    sep = _thermal_sep("=", width) if thermal else ("=" * width)
+    dash = _thermal_sep("-", width) if thermal else ("-" * width)
+    lines.extend(["", sep, "STATISTICS", dash])
+    for key, val in stats.items():
+        if not isinstance(val, dict):
+            continue
+        display = _stat_display_value(val)
+        if display is None:
+            continue
+        if thermal:
+            lines.append(f"{key}: {display}")
+        else:
+            lines.append(f"{key}: {display}")
+    lines.append("")
+
+
 def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     # Sieve Shaker: bypass the friability formatter entirely
     if _is_sieve_shaker_report(report_data):
@@ -1633,7 +1726,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     if rtype == "validation":
         _append_validation_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
     else:
-        recipe = report_data.get("recipe") or td.get("recipe") or td
+        recipe = report_data.get("recipe") or (td.get("recipe") if isinstance(td, dict) else None) or {}
         if not isinstance(recipe, dict):
             recipe = {}
         status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
@@ -1643,64 +1736,72 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             status_label = "Completed"
         else:
             status_label = "Completed" if status_raw == "completed" else (status_raw.title() if status_raw else "--")
-        derived = report_data.get("reportDerived")
-        if not isinstance(derived, dict) or not derived:
-            derived = build_test_report_derived(
-                td if isinstance(td, dict) else {}, recipe, report_data.get("id")
-            )
-        ts_start = td.get("testStartTime") or report_data.get("createdAt")
+        info = _build_friability_test_info(recipe, td if isinstance(td, dict) else {}, report_data)
+        ts_start = (td.get("testStartTime") if isinstance(td, dict) else None) or report_data.get("createdAt")
         ts_end = (
-            td.get("testEndTime")
+            (td.get("testEndTime") if isinstance(td, dict) else None)
             or report_data.get("completedAt")
-            or td.get("completedAt")
+            or (td.get("completedAt") if isinstance(td, dict) else None)
             or report_data.get("createdAt")
         )
         start_date, start_time = _split_ts_date_and_time(ts_start)
         end_date, end_time = _split_ts_date_and_time(ts_end)
-        batch_no = recipe.get("batchNumber") or td.get("batchNumber") or "N/A"
+        batch_no = recipe.get("batchNumber") or (td.get("batchNumber") if isinstance(td, dict) else None) or "N/A"
         if batch_no in (None, "", "N/A"):
-            b1 = td.get("batchNumber1") or recipe.get("batchNumber1")
-            b2 = td.get("batchNumber2") or recipe.get("batchNumber2")
+            b1 = (td.get("batchNumber1") if isinstance(td, dict) else None) or recipe.get("batchNumber1")
+            b2 = (td.get("batchNumber2") if isinstance(td, dict) else None) or recipe.get("batchNumber2")
             if b1 or b2:
                 batch_no = f"D1: {b1 or '--'}" + (f" | D2: {b2}" if b2 else "")
+        operator = report_data.get("operatorName") or (td.get("operatorName") if isinstance(td, dict) else None) or "--"
         if thermal:
             info_lines = [
                 sep,
                 "TEST INFORMATION",
-                f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
-                f"Batch No: {batch_no}",
-                f"Test Type: {derived.get('testType', '--')}",
-                f"Test Method: {derived.get('testMethod', '--')}",
-                f"RPM: {derived.get('rpm', '--')}",
-                f"Rotations: {derived.get('rotationCount', '--')}",
-                f"Drums: {derived.get('drumCount', '--')}",
-                f"Duration: {derived.get('durationFormatted', '--')}",
+                f"Test No: {info['testNumber']}",
+                f"Product: {recipe.get('productName') or (td.get('productName') if isinstance(td, dict) else None) or 'N/A'}",
+                f"Batch: {batch_no}",
+                f"Operator: {operator}",
+                f"Test Type: {info['testType']}",
+                f"Test Method: {info['testMethod']}",
+                f"Drops/Min: {info['rpm']}",
+                f"Total Taps: {info['rotationCount']}",
+                f"Drums: {info['drumCount']}",
                 f"Test Start Date: {start_date}",
                 f"Test Start Time: {start_time}",
                 f"Completed Date: {end_date}",
                 f"Completed Time: {end_time}",
-                f"Status: {status_label}",
+                f"Test Status: {status_label}",
+                "",
+                f"Test Duration: {info['durationFormatted']}",
             ]
             lines.extend(info_lines)
         else:
             lines.extend(["", "TEST INFORMATION", sep_dash])
             info_pairs = [
-                ("Product", recipe.get("productName", td.get("productName", "N/A"))),
-                ("Batch No", batch_no),
-                ("Test Type", derived.get("testType", "--")),
-                ("Test Method", derived.get("testMethod", "--")),
-                ("RPM", derived.get("rpm", "--")),
-                ("Rotations", derived.get("rotationCount", "--")),
-                ("Drums", derived.get("drumCount", "--")),
-                ("Duration", derived.get("durationFormatted", "--")),
-                ("Test Start Date", start_date),
-                ("Test Start Time", start_time),
-                ("Completed Date", end_date),
-                ("Completed Time", end_time),
-                ("Status", status_label),
+                ("Test No", info["testNumber"]),
+                ("Product", recipe.get("productName") or (td.get("productName") if isinstance(td, dict) else None) or "N/A"),
+                ("Batch", batch_no),
+                ("Operator", operator),
+                ("Test Type", info["testType"]),
+                ("Test Method", info["testMethod"]),
+                ("Drops/Min", info["rpm"]),
+                ("Drop Height", "--"),
+                ("Total Taps", info["rotationCount"]),
+                ("Test Start", start_date + " " + start_time if start_date != "--" else "--"),
+                ("Completed", end_date + " " + end_time if end_date != "--" else "--"),
+                ("Test Status", status_label),
+                ("Test Duration", info["durationFormatted"]),
             ]
             _append_two_column_pairs(lines, info_pairs, width)
         _append_test_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
+        _append_friability_statistics(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
+    # Approval remarks (thermal only — A4 path already handles via _append_test_report_details)
+    if thermal:
+        approval_remarks = report_data.get("approvalRemarks") if isinstance(report_data, dict) else None
+        if approval_remarks not in (None, "") and rtype != "validation":
+            # Already shown in REMARKS block by _append_test_report_details when present;
+            # show again explicitly in the approval section on thermal for visibility.
+            pass  # handled above in _append_test_report_details
     if thermal:
         lines.extend(["", "APPROVAL"])
     approval_pairs = _approval_result_pairs(
@@ -1711,8 +1812,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     if thermal:
         lines.extend(
             [
-                f"Operated by: {report_data.get('operatorName') or td.get('operatorName', '--')}",
-                f"Employee ID: {td.get('employeeId', '--')}",
+                f"Operated by: {report_data.get('operatorName') or (td.get('operatorName') if isinstance(td, dict) else '--') or '--'}",
+                f"Employee ID: {td.get('employeeId', '--') if isinstance(td, dict) else '--'}",
             ]
         )
         for label, value in approval_pairs:
@@ -1731,8 +1832,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         _append_two_column_pairs(
             lines,
             [
-                ("Operated by", report_data.get("operatorName") or td.get("operatorName", "--")),
-                ("Employee ID", td.get("employeeId", "--")),
+                ("Operated by", report_data.get("operatorName") or (td.get("operatorName") if isinstance(td, dict) else "--") or "--"),
+                ("Employee ID", td.get("employeeId", "--") if isinstance(td, dict) else "--"),
             ] + approval_pairs + [
                 ("Approved By", _strip_approver_role_label(report_data.get("approvedBy"))),
                 ("Approver ID", report_data.get("approvedByUsername", "--")),
@@ -1883,12 +1984,64 @@ def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = N
 
 
 _SIEVE_LOGO_BIN_PATH = pathlib.Path(__file__).parent / "assets" / "rle_logo_thermal.bin"
+_SIEVE_LOGO_PNG_PATHS = (
+    pathlib.Path(__file__).parent / "assets" / "rle_logo_nobg.png",
+    pathlib.Path(__file__).parent / "assets" / "rle_logo.png",
+)
+_THERMAL_LOGO_WIDTH_DOTS = 384  # Full width on common 58mm ESC/POS heads
+
+
+def _build_thermal_logo_escpos(width_dots: int = _THERMAL_LOGO_WIDTH_DOTS) -> bytes:
+    """Build a full-width ESC/POS GS v 0 raster from the RLE logo PNG."""
+    try:
+        from PIL import Image as _PILImage
+        import struct as _struct
+    except ImportError:
+        return b""
+
+    src = None
+    for path in _SIEVE_LOGO_PNG_PATHS:
+        if path.is_file():
+            src = path
+            break
+    if src is None:
+        return b""
+
+    try:
+        img = _PILImage.open(src)
+        if img.mode in ("RGBA", "LA"):
+            bg = _PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg.convert("L")
+        else:
+            img = img.convert("L")
+
+        width_dots = max(8, int(width_dots) - (int(width_dots) % 8))
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return b""
+        new_h = max(1, int(round(h * (width_dots / float(w)))))
+        img = img.resize((width_dots, new_h), _PILImage.LANCZOS)
+        # Keep dark logo ink on white paper.
+        bw = img.point(lambda p: 0 if p < 200 else 255, "1")
+        bw_w, bw_h = bw.size
+        bytes_per_row = (bw_w + 7) // 8
+        cmd = bytearray(b"\x1d\x76\x30\x00")
+        cmd += _struct.pack("<HH", bytes_per_row, bw_h)
+        cmd += bw.tobytes()
+        return bytes(cmd)
+    except Exception:
+        return b""
 
 
 def _send_thermal_logo(ser, baud: int) -> None:
-    """Send the pre-rendered ESC/POS raster logo bitmap followed by centering + newline."""
+    """Send a full-width thermal logo (PNG raster preferred; prebuilt .bin fallback)."""
     try:
-        logo_bytes = _SIEVE_LOGO_BIN_PATH.read_bytes()
+        logo_bytes = _build_thermal_logo_escpos(_THERMAL_LOGO_WIDTH_DOTS)
+        if not logo_bytes and _SIEVE_LOGO_BIN_PATH.is_file():
+            logo_bytes = _SIEVE_LOGO_BIN_PATH.read_bytes()
+        if not logo_bytes:
+            return
         # Centre-align: ESC a 1
         ser.write(b"\x1b\x61\x01")
         ser.flush()
@@ -1918,8 +2071,7 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         try:
             _send_printer_init(ser)
             time.sleep(0.2)
-            if is_sieve:
-                _send_thermal_logo(ser, baud)
+            _send_thermal_logo(ser, baud)
             if is_sieve and _THERMAL_GRAPH_MARKER in text:
                 # Split text around the graph marker and send chart image in between
                 before_graph, after_graph = text.split(_THERMAL_GRAPH_MARKER, 1)

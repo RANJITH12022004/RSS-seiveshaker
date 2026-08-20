@@ -502,7 +502,8 @@
         completedEarly: false,
         livePollInterval: null,
         targetSeconds: 0,
-        elapsedSeconds: 0
+        elapsedSeconds: 0,
+        pollStartTime: 0
     };
 
     function _srEl(id) { return document.getElementById(id); }
@@ -608,14 +609,18 @@
 
     function _srRefreshFromLive(data) {
         if (!data) return;
+        var phase = String(data.phase || 'off');
         var elapsed = parseFloat(data.elapsedSec);
         if (isNaN(elapsed)) elapsed = 0;
+        if (_sr.running && !data.programDone) {
+            var localElapsed = _sr.pollStartTime ? ((Date.now() - _sr.pollStartTime) / 1000) : 0;
+            elapsed = Math.max(elapsed, _sr.elapsedSeconds || 0, localElapsed);
+        }
         _sr.elapsedSeconds = elapsed;
         var target = parseInt(data.targetDurationSec, 10) || _sr.targetSeconds || 1;
         var remaining = Math.max(0, target - elapsed);
         var elapsedStr = formatSecondsToMmSs(Math.floor(elapsed));
         if (_srEl('tr-timer-right')) _srEl('tr-timer-right').textContent = elapsedStr;
-        var phase = String(data.phase || 'off');
         if (_srEl('tr-phase')) _srEl('tr-phase').textContent = phase.charAt(0).toUpperCase() + phase.slice(1);
         var pct = Math.min(100, (elapsed / Math.max(1, target)) * 100);
         if (_srEl('tr-progress-fill')) _srEl('tr-progress-fill').style.width = pct.toFixed(1) + '%';
@@ -653,6 +658,7 @@
         _sr.pollStartTime = Date.now();
         _sr.livePollInterval = setInterval(function () {
             var localElapsed = (Date.now() - _sr.pollStartTime) / 1000;
+            _sr.elapsedSeconds = Math.max(_sr.elapsedSeconds || 0, localElapsed);
             var elapsedStr = formatSecondsToMmSs(Math.floor(localElapsed));
             if (_srEl('tr-timer-right')) _srEl('tr-timer-right').textContent = elapsedStr;
             var pct = Math.min(100, (localElapsed / Math.max(1, _sr.targetSeconds)) * 100);

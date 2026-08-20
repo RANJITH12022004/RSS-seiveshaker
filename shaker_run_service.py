@@ -39,12 +39,28 @@ def _hw_mode_for_shaker(shaker_mode: str) -> str:
     return "I" if _normalize_mode(shaker_mode) == "INTERMITTENT" else "C"
 
 
-def _sleep_until(stop_at: float, tick: float = 0.1) -> bool:
+def _sleep_until(
+    stop_at: float,
+    tick: float = 0.1,
+    on_tick=None,
+    progress_tick: float = 0.5,
+) -> bool:
     """Sleep until stop_at or until stop/abort requested. Returns True if interrupted."""
+    last_progress_at = 0.0
     while _now() < stop_at:
+        now = _now()
+        if on_tick and (
+            last_progress_at == 0.0
+            or (now - last_progress_at) >= progress_tick
+            or (stop_at - now) <= progress_tick
+        ):
+            on_tick(now)
+            last_progress_at = now
         if _stop_event.is_set() or _abort_event.is_set():
             return True
-        time.sleep(min(tick, max(0.01, stop_at - _now())))
+        time.sleep(min(tick, max(0.01, stop_at - now)))
+    if on_tick:
+        on_tick(_now())
     return _stop_event.is_set() or _abort_event.is_set()
 
 
@@ -86,9 +102,17 @@ def _run_continuous(program: Dict[str, Any]) -> None:
     duration = max(1, int(program.get("durationSeconds") or 1))
     hw_mode = _hw_mode_for_shaker(program.get("shakerMode"))
     start = _now()
+
+    def publish_progress(now: float) -> None:
+        _update_progress(
+            phase="run",
+            elapsed_sec=min(duration, max(0.0, now - start)),
+            target_duration_sec=duration,
+        )
+
     _run_on(amplitude, hw_mode)
-    interrupted = _sleep_until(start + duration)
-    elapsed = _now() - start
+    interrupted = _sleep_until(start + duration, on_tick=publish_progress)
+    elapsed = min(duration, max(0.0, _now() - start))
     _ensure_off(hw_mode)
     _update_progress(
         phase="off",
@@ -114,31 +138,38 @@ def _run_intermittent(program: Dict[str, Any]) -> None:
             break
         segment_count += 1
         pulse_end = min(end_at, _now() + on_sec)
+
+        def publish_run_progress(now: float) -> None:
+            _update_progress(
+                phase="run",
+                elapsed_sec=min(duration, max(0.0, now - start)),
+                target_duration_sec=duration,
+                segment_index=segment_count,
+                segment_count=segment_count,
+            )
+
         _run_on(amplitude, hw_mode)
-        _update_progress(
-            phase="run",
-            elapsed_sec=_now() - start,
-            target_duration_sec=duration,
-            segment_index=segment_count,
-            segment_count=segment_count,
-        )
-        if _sleep_until(pulse_end):
+        if _sleep_until(pulse_end, on_tick=publish_run_progress):
             break
         _ensure_off(hw_mode)
         if _now() >= end_at:
             break
-        _update_progress(
-            phase="wait",
-            elapsed_sec=_now() - start,
-            target_duration_sec=duration,
-            segment_index=segment_count,
-            segment_count=segment_count,
-            running=False,
-        )
-        if _sleep_until(min(end_at, _now() + off_sec)):
+        wait_end = min(end_at, _now() + off_sec)
+
+        def publish_wait_progress(now: float) -> None:
+            _update_progress(
+                phase="wait",
+                elapsed_sec=min(duration, max(0.0, now - start)),
+                target_duration_sec=duration,
+                segment_index=segment_count,
+                segment_count=segment_count,
+                running=False,
+            )
+
+        if _sleep_until(wait_end, on_tick=publish_wait_progress):
             break
     _ensure_off(hw_mode)
-    elapsed = _now() - start
+    elapsed = min(duration, max(0.0, _now() - start))
     _update_progress(
         phase="off",
         elapsed_sec=elapsed,
@@ -164,29 +195,25 @@ def _run_logical(program: Dict[str, Any]) -> None:
         seg_type = str(seg.get("type") or "run").strip().lower()
         seg_dur = max(1, int(seg.get("durationSeconds") or 1))
         seg_end = _now() + seg_dur
+
+        def publish_segment_progress(now: float) -> None:
+            _update_progress(
+                phase="run" if seg_type == "run" else "wait",
+                elapsed_sec=min(total_target, max(0.0, now - start)),
+                target_duration_sec=total_target,
+                segment_index=idx + 1,
+                segment_count=seg_count,
+                running=(seg_type == "run"),
+            )
+
         if seg_type == "run":
             _run_on(amplitude, hw_mode)
-            _update_progress(
-                phase="run",
-                elapsed_sec=_now() - start,
-                target_duration_sec=total_target,
-                segment_index=idx + 1,
-                segment_count=seg_count,
-            )
         else:
             _ensure_off(hw_mode)
-            _update_progress(
-                phase="wait",
-                elapsed_sec=_now() - start,
-                target_duration_sec=total_target,
-                segment_index=idx + 1,
-                segment_count=seg_count,
-                running=False,
-            )
-        if _sleep_until(seg_end):
+        if _sleep_until(seg_end, on_tick=publish_segment_progress):
             break
     _ensure_off(hw_mode)
-    elapsed = _now() - start
+    elapsed = min(total_target, max(0.0, _now() - start))
     _update_progress(
         phase="off",
         elapsed_sec=elapsed,

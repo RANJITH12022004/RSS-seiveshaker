@@ -15,8 +15,34 @@ html {
     overscroll-behavior: none;
 }
 
-body {
+/* Kiosk UI must never show accidental text-selection highlights on labels/buttons/modals.
+   Chromium on touch can still select text inside buttons even when body is user-select:none. */
+html,
+body,
+button,
+a,
+label,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+span,
+div,
+svg,
+li,
+td,
+th,
+.nav-item,
+.settings-card,
+.btn-role-select,
+.modal-overlay,
+.role-modal {
     -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
     user-select: none;
 }
 
@@ -25,7 +51,20 @@ textarea,
 select,
 [contenteditable="true"] {
     -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
     user-select: text;
+}
+
+/* If selection still happens, keep it invisible outside editable fields. */
+*:not(input):not(textarea):not(select):not([contenteditable="true"])::selection {
+    background: transparent !important;
+    color: inherit !important;
+}
+
+*:not(input):not(textarea):not(select):not([contenteditable="true"])::-moz-selection {
+    background: transparent !important;
+    color: inherit !important;
 }
 
 * {
@@ -3063,13 +3102,13 @@ body {
 
 .report-a4-text-preview {
     display: block;
-    width: 100%;
+    width: 80ch;
     max-width: 100%;
     margin: 0 auto;
     padding: 0;
     font-family: 'Courier New', Courier, monospace;
-    font-size: 11pt;
-    line-height: 1.2;
+    font-size: 10.5pt;
+    line-height: 1.15;
     white-space: pre;
     tab-size: 4;
     letter-spacing: 0;
@@ -3082,12 +3121,12 @@ body {
 
 .report-preview-container.report-a4-preview-mode {
     font-family: 'Courier New', Courier, monospace;
-    font-size: 11pt;
-    line-height: 1.2;
-    width: 100%;
+    font-size: 10.5pt;
+    line-height: 1.15;
+    width: min(100%, 820px);
     max-width: 100%;
-    margin: 24px auto;
-    padding: 14mm 12mm;
+    margin: 16px auto;
+    padding: 12mm 10mm;
     min-height: auto;
     display: flex;
     flex-direction: column;
@@ -7318,13 +7357,13 @@ input[type="number"] {
 
 .report-a4-text-preview {
     display: block;
-    width: 100%;
+    width: 80ch;
     max-width: 100%;
     margin: 0 auto;
     padding: 0;
     font-family: 'Courier New', Courier, monospace;
-    font-size: 11pt;
-    line-height: 1.2;
+    font-size: 10.5pt;
+    line-height: 1.15;
     white-space: pre;
     tab-size: 4;
     letter-spacing: 0;
@@ -7337,12 +7376,12 @@ input[type="number"] {
 
 .report-preview-container.report-a4-preview-mode {
     font-family: 'Courier New', Courier, monospace;
-    font-size: 11pt;
-    line-height: 1.2;
-    width: 100%;
+    font-size: 10.5pt;
+    line-height: 1.15;
+    width: min(100%, 820px);
     max-width: 100%;
-    margin: 24px auto;
-    padding: 14mm 12mm;
+    margin: 16px auto;
+    padding: 12mm 10mm;
     min-height: auto;
     display: flex;
     flex-direction: column;

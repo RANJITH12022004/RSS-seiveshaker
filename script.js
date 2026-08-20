@@ -4,6 +4,35 @@ document.addEventListener('keydown', function (e) {
     if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '0' || e.key === '=')) e.preventDefault();
 });
 
+function _isEditableSelectionTarget(node) {
+    if (!node) return false;
+    var el = node.nodeType === 1 ? node : node.parentElement;
+    if (!el || !el.closest) return false;
+    return !!el.closest('input, textarea, select, [contenteditable="true"]');
+}
+
+function _clearNonEditableSelection() {
+    try {
+        var sel = window.getSelection ? window.getSelection() : null;
+        if (!sel || sel.rangeCount < 1) return;
+        if (_isEditableSelectionTarget(sel.anchorNode) || _isEditableSelectionTarget(sel.focusNode)) return;
+        sel.removeAllRanges();
+    } catch (e) {}
+}
+
+// Prevent Chromium touch/mouse from selecting label text on buttons/cards/modals.
+document.addEventListener('selectstart', function (e) {
+    if (_isEditableSelectionTarget(e.target)) return;
+    e.preventDefault();
+}, true);
+
+['pointerdown', 'pointerup', 'touchend', 'click', 'focusin'].forEach(function (evName) {
+    document.addEventListener(evName, function (e) {
+        if (_isEditableSelectionTarget(e.target)) return;
+        _clearNonEditableSelection();
+    }, true);
+});
+
 var API_BASE = '';
 var currentReportFilter = null;
 var membersCache = [];
@@ -2049,8 +2078,9 @@ function goToPage(pageName) {
     if (page) {
         page.classList.add('active');
     }
+    var navSection = getNavSectionForPage(pageName);
     document.querySelectorAll('.nav-item').forEach(function (item) {
-        item.classList.toggle('active', item.getAttribute('data-page') === pageName);
+        item.classList.toggle('active', item.getAttribute('data-page') === navSection);
     });
     var sidebarProfile = document.querySelector('.sidebar .user-profile');
     if (sidebarProfile) {
@@ -2194,6 +2224,42 @@ function goToPage(pageName) {
         ensureMainContentTouchScroll(pageName);
     }
     auditNavPageChange(pageName);
+}
+
+function getNavSectionForPage(pageName) {
+    var page = String(pageName || '').trim();
+    if (!page) return '';
+    if (page === 'user-profile') return 'user-profile';
+    var pageToSection = {
+        'home': 'home',
+        'approval-verify': 'home',
+        'quick-test': 'home',
+        'create-recipe-step1': 'home',
+        'manage-recipes': 'home',
+        'test-run': 'home',
+        'disable-recipes': 'home',
+        'view-recipes': 'home',
+        'recipe-print-preview': 'home',
+        'validate': 'validate',
+        'validate-type-select': 'validate',
+        'validation-run': 'validate',
+        'calibration-type-select': 'validate',
+        'load-calibration': 'validate',
+        'distance-zero-calibration': 'validate',
+        'reports': 'reports',
+        'export': 'reports',
+        'report-preview': 'reports',
+        'settings': 'settings',
+        'manage-members': 'settings',
+        'locked-members': 'settings',
+        'disabled-members': 'settings',
+        'add-member': 'settings',
+        'member-biometric': 'settings',
+        'ip-configure': 'settings',
+        'datetime': 'settings',
+        'factory-settings': 'settings',
+    };
+    return pageToSection[page] || '';
 }
 
 function goBack() {
@@ -6036,29 +6102,21 @@ function _populateLegacyReportPreview(preview) {
 
 function populateReportPreview(preview) {
     if (!preview) return;
+    // Always prefer the same monospace A4/dot-matrix text the printer uses.
     var a4Text = preview.a4Text;
     var useA4 = !!(a4Text && String(a4Text).trim());
     var a4Pre = document.getElementById('report-a4-text-preview');
     var legacy = document.getElementById('report-legacy-preview');
     var htmlDiv = document.getElementById('report-html-preview');
+    if (htmlDiv) {
+        htmlDiv.style.display = 'none';
+        htmlDiv.innerHTML = '';
+    }
 
-    if (preview.isSieveShaker && preview.htmlPreview) {
-        if (!htmlDiv) {
-            htmlDiv = document.createElement('div');
-            htmlDiv.id = 'report-html-preview';
-            if (a4Pre) a4Pre.parentNode.insertBefore(htmlDiv, a4Pre);
-            else if (legacy) legacy.parentNode.appendChild(htmlDiv);
-        }
-        htmlDiv.innerHTML = preview.htmlPreview;
-        htmlDiv.style.display = 'block';
-        if (a4Pre) a4Pre.style.display = 'none';
-        if (legacy) legacy.style.display = 'none';
-    } else if (useA4) {
-        if (htmlDiv) htmlDiv.style.display = 'none';
+    if (useA4) {
         _setReportPreviewDisplayMode('a4');
         if (a4Pre) a4Pre.textContent = a4Text;
     } else {
-        if (htmlDiv) htmlDiv.style.display = 'none';
         _setReportPreviewDisplayMode('legacy');
         _populateLegacyReportPreview(preview);
     }
