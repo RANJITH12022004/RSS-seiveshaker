@@ -24,11 +24,17 @@ detect_ozone_platform() {
     printf '%s' "$CHROMIUM_OZONE_PLATFORM"
     return
   fi
-  if [[ -n "${WAYLAND_DISPLAY:-}" ]] && [[ -z "${DISPLAY:-}" ]]; then
+  # VNC / remote X sessions need X11. Native labwc/Wayland kiosk must use Wayland
+  # so Chromium --kiosk is truly borderless (XWayland often keeps a title strip).
+  if [[ -n "${VNCSESSION:-}" || -n "${VNCDESKTOP:-}" ]]; then
+    printf 'x11'
+    return
+  fi
+  if [[ "${XDG_SESSION_TYPE:-}" == "wayland" || -n "${WAYLAND_DISPLAY:-}" ]]; then
     printf 'wayland'
     return
   fi
-  if [[ -n "${VNCSESSION:-}" || -n "${VNCDESKTOP:-}" || -n "${DISPLAY:-}" ]]; then
+  if [[ -n "${DISPLAY:-}" ]]; then
     printf 'x11'
     return
   fi
@@ -113,6 +119,7 @@ while true; do
     exit 0
   fi
   OZONE_PLATFORM="$(detect_ozone_platform)"
+  # No --app= (that restores a titled window chrome). Plain --kiosk + ozone platform.
   "$CHROME_BIN" \
     --start-fullscreen \
     --noerrdialogs \
@@ -123,9 +130,10 @@ while true; do
     --kiosk \
     --incognito \
     --disable-session-crashed-bubble \
-    --disable-features=TranslateUI \
+    --disable-features=TranslateUI,Translate,BackForwardCache \
     --ozone-platform="${OZONE_PLATFORM}" \
     --window-size="${DISPLAY_WIDTH},${DISPLAY_HEIGHT}" \
+    --window-position=0,0 \
     "${KIOSK_URL%/}" || true
   sleep 1
 done

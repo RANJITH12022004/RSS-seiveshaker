@@ -4,11 +4,121 @@ calculation_service.py - Sieve Shaker CFR recipe validation and form processing.
 """
 
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 
 def init():
     pass
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    try:
+        if val is None or val == "":
+            return default
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def compute_sieve_analysis(
+    test_data: Optional[Dict[str, Any]] = None,
+    recipe: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Sieve analysis retained mass = after tare weight - before tare weight.
+
+    Percentages are of the initial sample weight so retained bars sum toward 100%
+    when mass balance is complete (sieves + pan == sample).
+    """
+    td = test_data if isinstance(test_data, dict) else {}
+    recipe = recipe if isinstance(recipe, dict) else {}
+
+    try:
+        num_sieves = int(recipe.get("numSieves") or td.get("numSieves") or 0)
+    except (TypeError, ValueError):
+        num_sieves = 0
+    num_sieves = max(0, num_sieves)
+
+    sieve_sizes = list(recipe.get("sieveSizes") or td.get("sieveSizes") or [])
+    before_weights = list(td.get("beforeWeights") or [])
+    after_weights = list(td.get("afterWeights") or [])
+    sieve_weights = list(td.get("sieveWeights") or [])
+    sample_weight = _safe_float(td.get("initialWeight") or recipe.get("initialWeight") or 0.0)
+    stored_pan = _safe_float(td.get("panWeight") or 0.0)
+
+    rows: List[Dict[str, Any]] = []
+    fracs: List[float] = []
+    labels: List[str] = []
+
+    for i in range(num_sieves):
+        bw = _safe_float(before_weights[i] if i < len(before_weights) else 0.0)
+        if i < len(after_weights):
+            aw = _safe_float(after_weights[i])
+            retained = aw - bw
+            has_pair = True
+        elif i < len(sieve_weights):
+            aw = bw + _safe_float(sieve_weights[i])
+            retained = _safe_float(sieve_weights[i])
+            has_pair = False
+        else:
+            aw = 0.0
+            retained = 0.0
+            has_pair = False
+        retained = max(0.0, retained)
+        pct = (retained / sample_weight * 100.0) if sample_weight > 0 else 0.0
+        size = sieve_sizes[i] if i < len(sieve_sizes) else ""
+        label = f"C{i + 1}"
+        rows.append({
+            "index": i + 1,
+            "label": label,
+            "size": size,
+            "before": bw,
+            "after": aw,
+            "retained": retained,
+            "percent": pct,
+            "isPan": False,
+            "hasBeforeAfter": has_pair,
+        })
+        fracs.append(retained)
+        labels.append(label)
+
+    pan_before = _safe_float(before_weights[num_sieves] if len(before_weights) > num_sieves else 0.0)
+    if len(after_weights) > num_sieves:
+        pan_after = _safe_float(after_weights[num_sieves])
+        pan_retained = max(0.0, pan_after - pan_before)
+        pan_has_pair = True
+    else:
+        # panWeight is stored as retained fraction by the weigh wizard.
+        pan_retained = max(0.0, stored_pan)
+        pan_after = pan_before + pan_retained if pan_before or pan_retained else stored_pan
+        pan_has_pair = False
+    pan_pct = (pan_retained / sample_weight * 100.0) if sample_weight > 0 else 0.0
+    rows.append({
+        "index": num_sieves + 1,
+        "label": "Pan",
+        "size": "Receiver",
+        "before": pan_before,
+        "after": pan_after,
+        "retained": pan_retained,
+        "percent": pan_pct,
+        "isPan": True,
+        "hasBeforeAfter": pan_has_pair,
+    })
+    fracs.append(pan_retained)
+    labels.append("Pan")
+
+    total_retained = sum(fracs)
+    total_pct = (total_retained / sample_weight * 100.0) if sample_weight > 0 else 0.0
+
+    return {
+        "numSieves": num_sieves,
+        "sampleWeight": sample_weight,
+        "rows": rows,
+        "fractions": fracs,
+        "labels": labels,
+        "totalRetained": total_retained,
+        "totalPercent": total_pct,
+    }
 
 
 def _parse_positive_int(val, field_name: str, min_val: int = 1) -> int:

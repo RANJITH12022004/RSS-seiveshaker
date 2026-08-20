@@ -9,6 +9,7 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
+import calculation_service
 import data_service
 
 _config = {}
@@ -625,16 +626,13 @@ def _format_sieve_shaker_a4_text(report: Dict[str, Any]) -> str:
     date_str = created_at[:10] if len(created_at) >= 10 else "n/a"
     time_str = created_at[11:19] if len(created_at) >= 19 else "n/a"
 
-    num_sieves = int(recipe.get("numSieves") or td.get("numSieves") or 0)
-    sieve_sizes = recipe.get("sieveSizes") or td.get("sieveSizes") or []
-    sieve_weights = td.get("sieveWeights") or []
-    before_weights = td.get("beforeWeights") or []
-    after_weights = td.get("afterWeights") or []
-    pan_weight = float(td.get("panWeight") or 0)
-    sample_weight = float(td.get("initialWeight") or 0)
-    final_weight = float(td.get("finalWeight") or 0)
+    analysis = calculation_service.compute_sieve_analysis(
+        td if isinstance(td, dict) else {},
+        recipe if isinstance(recipe, dict) else {},
+    )
+    sample_weight = float(analysis.get("sampleWeight") or 0.0)
+    final_weight = float(analysis.get("totalRetained") or td.get("finalWeight") or 0.0)
 
-    approval_status = r.get("reportApprovalStatus") or "pending"
     approval_pf = r.get("approvalPassFail") or "PENDING"
     approved_by = r.get("approvedBy") or "n/a"
     approved_at = str(r.get("approvedAt") or "")[:10] or "n/a"
@@ -690,21 +688,30 @@ def _format_sieve_shaker_a4_text(report: Dict[str, Any]) -> str:
             f"  Sample Weight  : {sample_weight:.4f} g",
             f"  Final Weight   : {final_weight:.4f} g",
             sep,
-            "  SIEVE ANALYSIS",
+            "  SIEVE ANALYSIS  (retained = after - before)",
             sep,
             f"  {'Sieve':<6} {'Size (µm)':<12} {'Before (g)':<12} {'After (g)':<12} {'Frac (g)':<10} {'%':<6}",
             sep,
         ]
-    if not is_validation:
-        for i in range(num_sieves):
-            size = sieve_sizes[i] if i < len(sieve_sizes) else "n/a"
-            bw = float(before_weights[i]) if i < len(before_weights) else 0.0
-            aw = float(after_weights[i]) if i < len(after_weights) else (float(sieve_weights[i]) if i < len(sieve_weights) else 0.0)
-            frac = aw - bw if (bw or aw) else float(sieve_weights[i]) if i < len(sieve_weights) else 0.0
-            pct = (frac / sample_weight * 100) if sample_weight > 0 else 0.0
-            lines.append(f"  {str(i+1):<6} {str(size):<12} {bw:<12.4f} {aw:<12.4f} {frac:<10.4f} {pct:<6.2f}")
-        pan_pct = (pan_weight / sample_weight * 100) if sample_weight > 0 else 0.0
-        lines.append(f"  {'PAN':<6} {'Receiver':<12} {'--':<12} {pan_weight:<12.4f} {pan_weight:<10.4f} {pan_pct:<6.2f}")
+        for row in analysis.get("rows") or []:
+            label = "PAN" if row.get("isPan") else str(row.get("index") or "")
+            size = str(row.get("size") if row.get("size") not in (None, "") else "n/a")
+            bw = float(row.get("before") or 0.0)
+            aw = float(row.get("after") or 0.0)
+            frac = float(row.get("retained") or 0.0)
+            pct = float(row.get("percent") or 0.0)
+            lines.append(
+                f"  {label:<6} {size:<12} {bw:<12.4f} {aw:<12.4f} {frac:<10.4f} {pct:<6.2f}"
+            )
+        lines.append(sep)
+        # Dot-matrix A4 bar graph (same analysis as thermal; scaled to sample = 100%).
+        try:
+            import print_service as _ps
+            chart_lines = _ps._format_sieve_ascii_chart(analysis, width=w, bar_width=20)
+            for cl in chart_lines:
+                lines.append(f"  {cl}" if not cl.startswith(" ") else cl)
+        except Exception:
+            pass
     lines += [
         sep,
         "  APPROVAL",
@@ -1076,28 +1083,24 @@ def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
     approval_remarks = esc(str(r.get("approvalRemarks") or ""))
 
     # ── Test-specific: sieve weights ─────────────────────────────────────────
-    num_sieves    = int(recipe.get("numSieves") or td.get("numSieves") or 0)
-    sieve_sizes   = recipe.get("sieveSizes") or td.get("sieveSizes") or []
-    before_weights = [float(x) for x in (td.get("beforeWeights") or [])]
-    after_weights  = [float(x) for x in (td.get("afterWeights") or [])]
-    sieve_weights  = [float(x) for x in (td.get("sieveWeights") or [])]
-    pan_weight     = float(td.get("panWeight") or 0)
-    initial_weight = float(td.get("initialWeight") or recipe.get("initialWeight") or 0)
-    final_weight   = float(td.get("finalWeight") or 0)
+    analysis = calculation_service.compute_sieve_analysis(
+        td if isinstance(td, dict) else {},
+        recipe if isinstance(recipe, dict) else {},
+    )
+    num_sieves = int(analysis.get("numSieves") or 0)
+    sieve_sizes = [row.get("size") for row in (analysis.get("rows") or []) if not row.get("isPan")]
+    fractions = [float(row.get("retained") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
+    pan_weight = 0.0
+    for row in analysis.get("rows") or []:
+        if row.get("isPan"):
+            pan_weight = float(row.get("retained") or 0.0)
+            break
+    initial_weight = float(analysis.get("sampleWeight") or 0.0)
+    final_weight = float(analysis.get("totalRetained") or td.get("finalWeight") or 0.0)
+    before_weights = [float(row.get("before") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
+    after_weights = [float(row.get("after") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
 
-    # Compute fractions: prefer explicit sieve_weights, otherwise after - before
-    fractions = []
-    for i in range(num_sieves):
-        if i < len(sieve_weights) and sieve_weights[i]:
-            fractions.append(sieve_weights[i])
-        elif i < len(after_weights) and i < len(before_weights):
-            fractions.append(max(0.0, after_weights[i] - before_weights[i]))
-        elif i < len(after_weights):
-            fractions.append(after_weights[i])
-        else:
-            fractions.append(0.0)
-
-    total_fraction = sum(fractions) + pan_weight
+    total_fraction = float(analysis.get("totalRetained") or 0.0)
 
     # ── Validation-specific ──────────────────────────────────────────────────
     val_type    = esc(str(recipe.get("validationType") or td.get("validationType") or "--").title())
@@ -1107,56 +1110,70 @@ def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
     # ── Bar chart SVG (greyscale, test reports only) ──────────────────────────
     bar_html = ""
     if not is_validation and num_sieves > 0:
-        bar_values = fractions + [pan_weight]
-        bar_labels = [str(i + 1) for i in range(num_sieves)] + ["PAN"]
-        max_val    = max(bar_values) if any(v > 0 for v in bar_values) else 1.0
-        if max_val == 0:
-            max_val = 1.0
+        bar_values = list(analysis.get("fractions") or (fractions + [pan_weight]))
+        bar_labels = list(analysis.get("labels") or ([str(i + 1) for i in range(num_sieves)] + ["PAN"]))
+        # Scale to sample weight so bar height == % of powder (sums toward 100%).
+        scale = initial_weight if initial_weight > 0 else (max(bar_values) if any(v > 0 for v in bar_values) else 1.0)
+        if scale <= 0:
+            scale = 1.0
         bw = 38; bg = 10; ch = 200; pad_l = 50; pad_r = 20; pad_t = 20; pad_b = 30
         cw = pad_l + (bw + bg) * len(bar_values) + pad_r
         svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {cw} {ch}" width="100%" style="max-height:220px;border:1px solid #aaa;background:#fff;">'
-        # Y-axis gridlines and labels
+        # Y-axis gridlines and labels as % of sample
         for tick_pct in range(0, 101, 20):
-            tick_val = max_val * tick_pct / 100
+            tick_val = scale * tick_pct / 100
             y = pad_t + (ch - pad_t - pad_b) * (1 - tick_pct / 100)
             svg += f'<line x1="{pad_l}" y1="{y:.1f}" x2="{cw - pad_r}" y2="{y:.1f}" stroke="#ddd" stroke-width="0.8"/>'
-            svg += f'<text x="{pad_l - 4}" y="{y + 3:.1f}" text-anchor="end" font-size="8" fill="#444">{tick_val:.2f}</text>'
+            svg += f'<text x="{pad_l - 4}" y="{y + 3:.1f}" text-anchor="end" font-size="8" fill="#444">{tick_val:.1f}g</text>'
         # Y-axis label
-        svg += f'<text x="10" y="{ch//2}" text-anchor="middle" font-size="9" fill="#333" transform="rotate(-90,10,{ch//2})">Weight (g)</text>'
+        svg += f'<text x="10" y="{ch//2}" text-anchor="middle" font-size="9" fill="#333" transform="rotate(-90,10,{ch//2})">Retained (g)</text>'
         # Bars
         greys = ["#111","#333","#555","#666","#777","#888","#999","#aaa","#444"]
         for idx, (val, lbl) in enumerate(zip(bar_values, bar_labels)):
-            h = (val / max_val) * (ch - pad_t - pad_b)
+            h = min(1.0, max(0.0, float(val) / scale)) * (ch - pad_t - pad_b)
             x = pad_l + idx * (bw + bg)
             y = pad_t + (ch - pad_t - pad_b) - h
             color = greys[idx % len(greys)]
             svg += f'<rect x="{x}" y="{y:.1f}" width="{bw}" height="{h:.1f}" fill="{color}"/>'
-            pct = (val / initial_weight * 100) if initial_weight > 0 else 0
+            pct = (float(val) / initial_weight * 100) if initial_weight > 0 else 0
             svg += f'<text x="{x + bw/2:.1f}" y="{y - 3:.1f}" text-anchor="middle" font-size="8" fill="#000">{pct:.1f}%</text>'
             svg += f'<text x="{x + bw/2:.1f}" y="{ch - pad_b + 14}" text-anchor="middle" font-size="9" fill="#000">{lbl}</text>'
         svg += '</svg>'
         bar_html = f'''
-<h3>Particle Size Distribution — Fraction per Sieve (g)</h3>
+<h3>Particle Size Distribution — Fraction per Sieve (% of sample)</h3>
 <div class="chart-section">{svg}</div>'''
 
     # ── Sieve table rows ──────────────────────────────────────────────────────
     sieve_table_html = ""
     if not is_validation:
         rows = ""
-        for i in range(num_sieves):
-            size   = sieve_sizes[i] if i < len(sieve_sizes) else "--"
-            bw_val = before_weights[i] if i < len(before_weights) else 0.0
-            aw_val = after_weights[i]  if i < len(after_weights)  else 0.0
-            frac   = fractions[i] if i < len(fractions) else 0.0
-            pct    = (frac / initial_weight * 100) if initial_weight > 0 else 0.0
-            rows  += f"<tr><td>{i+1}</td><td>{size} µm</td><td>{bw_val:.4f}</td><td>{aw_val:.4f}</td><td>{frac:.4f}</td><td>{pct:.2f}%</td></tr>\n"
-        # PAN row
-        pan_before = before_weights[num_sieves] if num_sieves < len(before_weights) else 0.0
-        pan_after  = after_weights[num_sieves]  if num_sieves < len(after_weights)  else pan_weight
-        pan_pct    = (pan_weight / initial_weight * 100) if initial_weight > 0 else 0.0
-        rows += f"<tr><td>PAN</td><td>Receiver</td><td>{pan_before:.4f}</td><td>{pan_after:.4f}</td><td>{pan_weight:.4f}</td><td>{pan_pct:.2f}%</td></tr>\n"
-        total_pct  = (total_fraction / initial_weight * 100) if initial_weight > 0 else 0.0
-        rows += f'<tr style="font-weight:bold;background:#f0f0f0;"><td colspan="4">Total</td><td>{total_fraction:.4f}</td><td>{total_pct:.2f}%</td></tr>\n'
+        for row in analysis.get("rows") or []:
+            if row.get("isPan"):
+                continue
+            size = row.get("size") if row.get("size") not in (None, "") else "--"
+            bw_val = float(row.get("before") or 0.0)
+            aw_val = float(row.get("after") or 0.0)
+            frac = float(row.get("retained") or 0.0)
+            pct = float(row.get("percent") or 0.0)
+            rows += (
+                f"<tr><td>{row.get('index')}</td><td>{size} µm</td>"
+                f"<td>{bw_val:.4f}</td><td>{aw_val:.4f}</td>"
+                f"<td>{frac:.4f}</td><td>{pct:.2f}%</td></tr>\n"
+            )
+        pan_row = next((r for r in (analysis.get("rows") or []) if r.get("isPan")), None) or {}
+        pan_before = float(pan_row.get("before") or 0.0)
+        pan_after = float(pan_row.get("after") or 0.0)
+        pan_retained = float(pan_row.get("retained") or 0.0)
+        pan_pct = float(pan_row.get("percent") or 0.0)
+        rows += (
+            f"<tr><td>PAN</td><td>Receiver</td><td>{pan_before:.4f}</td>"
+            f"<td>{pan_after:.4f}</td><td>{pan_retained:.4f}</td><td>{pan_pct:.2f}%</td></tr>\n"
+        )
+        total_pct = float(analysis.get("totalPercent") or 0.0)
+        rows += (
+            f'<tr style="font-weight:bold;background:#f0f0f0;"><td colspan="4">Total</td>'
+            f"<td>{total_fraction:.4f}</td><td>{total_pct:.2f}%</td></tr>\n"
+        )
         sieve_table_html = f'''
 <h3>Sieve Analysis Data</h3>
 <table>

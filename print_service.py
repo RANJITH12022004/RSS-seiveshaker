@@ -11,6 +11,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+import calculation_service
+
 try:
     import serial
 except ImportError:
@@ -1283,16 +1285,45 @@ def _fmt_amplitude_display(raw: Any) -> str:
 
 
 def _ascii_bar(fraction: float, bar_width: int = 12) -> str:
-    """Return an ASCII bar of given width filled proportionally (ASCII-only for thermal)."""
+    """Return an ASCII bar of given width filled proportionally (ASCII-only for thermal/A4)."""
     filled = min(bar_width, max(0, int(round(fraction * bar_width))))
     return "#" * filled + "-" * (bar_width - filled)
+
+
+def _format_sieve_ascii_chart(analysis: Dict[str, Any], width: int = 56, bar_width: int = 20) -> list:
+    """Monospace particle-size bar chart scaled to sample weight (100%)."""
+    sample = float(analysis.get("sampleWeight") or 0.0)
+    rows = list(analysis.get("rows") or [])
+    if not rows:
+        return []
+    lines = [
+        "PARTICLE SIZE DISTRIBUTION".center(width),
+        f"(retained g / sample {sample:.4f} g)".center(width),
+        "",
+    ]
+    for row in rows:
+        retained = float(row.get("retained") or 0.0)
+        pct = float(row.get("percent") or 0.0)
+        label = str(row.get("label") or "")
+        # Scale bars to sample weight so visual height == % of powder.
+        frac_of_sample = (retained / sample) if sample > 0 else 0.0
+        bar = _ascii_bar(frac_of_sample, bar_width)
+        lines.append(f"{label:<4} [{bar}] {pct:6.2f}%  {retained:8.4f} g")
+    total = float(analysis.get("totalRetained") or 0.0)
+    total_pct = float(analysis.get("totalPercent") or 0.0)
+    lines.append("")
+    lines.append(f"Total recovered: {total:.4f} g ({total_pct:.2f}% of sample)")
+    return lines
 
 
 _THERMAL_GRAPH_MARKER = "\x00__SIEVE_GRAPH__\x00"
 
 
 def _build_bar_chart_escpos(fracs: list, labels: list, sample_weight: float, width_dots: int = 384) -> bytes:
-    """Render a greyscale bar chart to ESC/POS GS v 0 raster bytes."""
+    """Render a greyscale bar chart to ESC/POS GS v 0 raster bytes.
+
+    Bar height is scaled to sample_weight (100% of powder), not to the tallest bar.
+    """
     try:
         from PIL import Image as _PILImage, ImageDraw as _PILDraw
         import struct as _struct
@@ -1310,22 +1341,26 @@ def _build_bar_chart_escpos(fracs: list, labels: list, sample_weight: float, wid
     bar_w = max(4, (chart_w - bar_gap * (num_bars + 1)) // num_bars)
     img = _PILImage.new("L", (img_w, img_h), 255)
     draw = _PILDraw.Draw(img)
-    max_val = max((v for v in fracs if v > 0), default=1.0) or 1.0
+    # Full scale = sample weight so bars reflect % of powder (sum toward 100%).
+    scale = float(sample_weight) if sample_weight and sample_weight > 0 else 0.0
+    if scale <= 0:
+        scale = max((v for v in fracs if v > 0), default=1.0) or 1.0
     greys = [20, 60, 100, 140, 80, 40, 120, 160, 50]
     for i, (val, lbl) in enumerate(zip(fracs, labels)):
-        bar_h = int((max(0.0, val) / max_val) * chart_h)
+        bar_h = int(min(1.0, max(0.0, float(val) / scale)) * chart_h)
         x0 = margin_l + bar_gap + i * (bar_w + bar_gap)
         x1 = x0 + bar_w
         y0 = margin_t + chart_h - bar_h
         y1 = margin_t + chart_h
         draw.rectangle([x0, y0, x1, y1], fill=greys[i % len(greys)])
-        pct_str = f"{(val / sample_weight * 100) if sample_weight > 0 else 0:.1f}%"
+        pct_str = f"{(float(val) / float(sample_weight) * 100) if sample_weight > 0 else 0:.1f}%"
         if bar_h > 6:
             draw.text((x0 + bar_w // 2, max(margin_t + 4, y0 - 6)), pct_str, fill=0, anchor="mm")
         draw.text((x0 + bar_w // 2, img_h - margin_b + 9), lbl, fill=0, anchor="mm")
     draw.line([(margin_l, margin_t), (margin_l, margin_t + chart_h)], fill=0, width=1)
     draw.line([(margin_l, margin_t + chart_h), (img_w - margin_r, margin_t + chart_h)], fill=0, width=1)
-    bw = img.point(lambda p: 0 if p < 200 else 255, "1")
+    # ESC/POS GS v 0: bit 1 = black dot (same polarity as thermal logo).
+    bw = img.point(lambda p: 0 if p > 127 else 1, "1")
     bw_w, bw_h = bw.size
     bytes_per_row = (bw_w + 7) // 8
     cmd = bytearray(b"\x1d\x76\x30\x00")
@@ -1448,32 +1483,10 @@ def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -
             f"Actual Amplitude: {actual_amp}",
         ]
     else:
-        # Sample weights + sieve analysis table + ASCII bar chart
-        try:
-            sample_weight = float(td.get("initialWeight") or 0)
-        except (TypeError, ValueError):
-            sample_weight = 0.0
-        try:
-            final_weight = float(td.get("finalWeight") or 0)
-        except (TypeError, ValueError):
-            final_weight = 0.0
-        try:
-            pan_weight = float(td.get("panWeight") or 0)
-        except (TypeError, ValueError):
-            pan_weight = 0.0
-
-        num_sieves = 0
-        try:
-            num_sieves = int(recipe.get("numSieves") or td.get("numSieves") or 0)
-        except (TypeError, ValueError):
-            pass
-        sieve_sizes = recipe.get("sieveSizes") or td.get("sieveSizes") or []
-        before_weights = td.get("beforeWeights") or []
-        after_weights = td.get("afterWeights") or []
-        sieve_weights = td.get("sieveWeights") or []
-
-        # Final weight recovered = sum of all sieve fractions + pan (mass balance)
-        # This is computed below after fracs are built; use stored value as fallback
+        # Sample weights + sieve analysis table + bitmap chart marker
+        analysis = calculation_service.compute_sieve_analysis(td if isinstance(td, dict) else {}, recipe)
+        sample_weight = float(analysis.get("sampleWeight") or 0.0)
+        total_recovered = float(analysis.get("totalRetained") or 0.0)
         lines += [
             dash,
             "SAMPLE WEIGHTS",
@@ -1482,44 +1495,24 @@ def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -
             "SIEVE ANALYSIS",
         ]
 
-        # Compact sieve table: S# Size  After%
-        # Header: "S# Size(um)  Wt(g)   %"
-        # Columns at 32 chars: "#" (2), " ", "Size" (5), " ", "Wt" (7), " ", "%" (5) = 22 total; pad rest
+        # Compact sieve table: retained mass = after - before
         col_hdr = f"{'#':>2} {'Size':>5} {'Wt(g)':>7} {'%':>5}"
         lines.append(col_hdr)
         lines.append("-" * len(col_hdr))
 
-        fracs = []
-        pcts = []
-        sizes_display = []
-        for i in range(num_sieves):
-            size = sieve_sizes[i] if i < len(sieve_sizes) else "?"
-            bw = float(before_weights[i]) if i < len(before_weights) else 0.0
-            aw = float(after_weights[i]) if i < len(after_weights) else (
-                float(sieve_weights[i]) if i < len(sieve_weights) else 0.0
-            )
-            frac = aw - bw if (bw or aw) else (float(sieve_weights[i]) if i < len(sieve_weights) else 0.0)
-            pct = (frac / sample_weight * 100) if sample_weight > 0 else 0.0
-            fracs.append(frac)
-            pcts.append(pct)
-            sizes_display.append(str(size))
-            lines.append(f"{i+1:>2} {str(size):>5} {frac:>7.4f} {pct:>5.2f}")
+        for row in analysis.get("rows") or []:
+            label = "P" if row.get("isPan") else str(row.get("index") or "")
+            size = "Pan" if row.get("isPan") else str(row.get("size") or "?")
+            retained = float(row.get("retained") or 0.0)
+            pct = float(row.get("percent") or 0.0)
+            lines.append(f"{label:>2} {size:>5} {retained:>7.4f} {pct:>5.2f}")
 
-        pan_pct = (pan_weight / sample_weight * 100) if sample_weight > 0 else 0.0
-        fracs.append(pan_weight)
-        pcts.append(pan_pct)
-        sizes_display.append("Pan")
-        lines.append(f"{'P':>2} {'Pan':>5} {pan_weight:>7.4f} {pan_pct:>5.2f}")
-
-        # Total recovered = sum of all fractions including pan
-        total_recovered = sum(fracs)
         lines += [
-            f"{'Tot':>2} {' ':>5} {total_recovered:>7.4f} {(total_recovered/sample_weight*100 if sample_weight>0 else 0):>5.2f}",
+            f"{'Tot':>2} {' ':>5} {total_recovered:>7.4f} {float(analysis.get('totalPercent') or 0):>5.2f}",
             f"Final Wt: {total_recovered:.4f} g",
         ]
 
-        # Store fracs/labels for chart image (printed via ESC/POS in print_thermal_report)
-        # Insert a marker — the caller replaces this with the actual bitmap
+        # Bitmap chart is printed by print_thermal_report at this marker.
         lines.append(_THERMAL_GRAPH_MARKER)
 
     # Approval
@@ -1530,12 +1523,6 @@ def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -
     approved_date = (approved_at_raw[:10] if len(approved_at_raw) >= 10 else "N/A").replace("-", "/")
     approved_time = approved_at_raw[11:19] if len(approved_at_raw) >= 19 else "N/A"
     approval_remarks = r.get("approvalRemarks") or ""
-
-    # Printed date/time (wall-clock moment of printing)
-    from datetime import datetime as _dt
-    _now = _dt.now()
-    printed_date = _now.strftime("%d/%m/%Y")
-    printed_time = _now.strftime("%H:%M:%S")
 
     lines += [
         SEP,
@@ -1550,14 +1537,10 @@ def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -
     ]
     if approval_remarks:
         lines.append(f"Remarks: {approval_remarks}")
-    lines += [
-        SEP,
-        f"Printed Date: {printed_date}",
-        f"Printed Time: {printed_time}",
-        SEP,
-    ]
+    lines += [SEP]
 
-    # Compact: fit to width, collapse consecutive blanks, strip trailing blanks
+    # Compact: fit to width, collapse consecutive blanks, strip trailing blanks.
+    # Printed Date/Time is appended once by format_for_thermal_printer / format_for_a4_printer.
     flat: list = []
     for line in lines:
         flat.extend(_fit_thermal_line(str(line), width))
@@ -1985,6 +1968,8 @@ def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = N
 
 _SIEVE_LOGO_BIN_PATH = pathlib.Path(__file__).parent / "assets" / "rle_logo_thermal.bin"
 _SIEVE_LOGO_PNG_PATHS = (
+    # Prefer the thermal-ready icon (white background, dark logo) — print as-is, no invert.
+    pathlib.Path(__file__).parent / "assets" / "imiages" / "apple-touch-icon.png",
     pathlib.Path(__file__).parent / "assets" / "rle_logo_nobg.png",
     pathlib.Path(__file__).parent / "assets" / "rle_logo.png",
 )
@@ -1992,7 +1977,7 @@ _THERMAL_LOGO_WIDTH_DOTS = 384  # Full width on common 58mm ESC/POS heads
 
 
 def _build_thermal_logo_escpos(width_dots: int = _THERMAL_LOGO_WIDTH_DOTS) -> bytes:
-    """Build a full-width ESC/POS GS v 0 raster from the RLE logo PNG."""
+    """Build a full-width ESC/POS GS v 0 raster from the reference logo PNG (no invert)."""
     try:
         from PIL import Image as _PILImage
         import struct as _struct
@@ -2022,8 +2007,8 @@ def _build_thermal_logo_escpos(width_dots: int = _THERMAL_LOGO_WIDTH_DOTS) -> by
             return b""
         new_h = max(1, int(round(h * (width_dots / float(w)))))
         img = img.resize((width_dots, new_h), _PILImage.LANCZOS)
-        # Keep dark logo ink on white paper.
-        bw = img.point(lambda p: 0 if p < 200 else 255, "1")
+        # ESC/POS GS v 0: bit 1 = black dot. Dark ink → 1, white paper → 0 (do not invert).
+        bw = img.point(lambda p: 0 if p > 127 else 1, "1")
         bw_w, bw_h = bw.size
         bytes_per_row = (bw_w + 7) // 8
         cmd = bytearray(b"\x1d\x76\x30\x00")
@@ -2076,32 +2061,18 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
                 # Split text around the graph marker and send chart image in between
                 before_graph, after_graph = text.split(_THERMAL_GRAPH_MARKER, 1)
                 _send_text_to_thermal(ser, before_graph.rstrip("\n"), baud)
-                # Build and send bar chart image
+                # Build and send bar chart image scaled to sample weight.
                 r = dict(report_data or {})
                 td = r.get("testData") or r
                 recipe = r.get("recipe") or {}
                 try:
-                    num_sieves = int(recipe.get("numSieves") or td.get("numSieves") or 0)
-                    sieve_sizes = recipe.get("sieveSizes") or td.get("sieveSizes") or []
-                    before_weights = td.get("beforeWeights") or []
-                    after_weights = td.get("afterWeights") or []
-                    sieve_weights_raw = td.get("sieveWeights") or []
-                    sample_weight = float(td.get("initialWeight") or 0)
-                    pan_weight = float(td.get("panWeight") or 0)
-                    fracs = []
-                    labels = []
-                    for i in range(num_sieves):
-                        bw_v = float(before_weights[i]) if i < len(before_weights) else 0.0
-                        aw_v = float(after_weights[i]) if i < len(after_weights) else (
-                            float(sieve_weights_raw[i]) if i < len(sieve_weights_raw) else 0.0
-                        )
-                        frac = aw_v - bw_v if (bw_v or aw_v) else (
-                            float(sieve_weights_raw[i]) if i < len(sieve_weights_raw) else 0.0
-                        )
-                        fracs.append(max(0.0, frac))
-                        labels.append(f"S{i+1}")
-                    fracs.append(pan_weight)
-                    labels.append("Pan")
+                    analysis = calculation_service.compute_sieve_analysis(
+                        td if isinstance(td, dict) else {},
+                        recipe if isinstance(recipe, dict) else {},
+                    )
+                    fracs = list(analysis.get("fractions") or [])
+                    labels = list(analysis.get("labels") or [])
+                    sample_weight = float(analysis.get("sampleWeight") or 0.0)
                     chart_cmd = _build_bar_chart_escpos(fracs, labels, sample_weight)
                     if chart_cmd:
                         ser.write(b"\x1b\x61\x01")  # centre align
