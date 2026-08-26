@@ -180,16 +180,6 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
         except ValueError as e:
             errors.append(str(e))
 
-    if shaker_mode == "INTERMITTENT":
-        try:
-            _parse_positive_int(recipe_data.get("intermittentOnSeconds"), "On time")
-        except ValueError as e:
-            errors.append(str(e))
-        try:
-            _parse_positive_int(recipe_data.get("intermittentOffSeconds"), "Off time")
-        except ValueError as e:
-            errors.append(str(e))
-
     if shaker_mode == "LOGICAL":
         segments = recipe_data.get("logicalSegments") or []
         errors.extend(_validate_logical_segments(segments))
@@ -205,9 +195,22 @@ def process_recipe_form_data(form_data: Dict[str, Any]) -> Dict[str, Any]:
     recipe["shakerMode"] = str(recipe.get("shakerMode") or "CONTINUOUS").strip().upper()
     if recipe.get("amplitude") is not None:
         recipe["amplitude"] = int(recipe["amplitude"])
-    for key in ("durationSeconds", "intermittentOnSeconds", "intermittentOffSeconds"):
+    for key in ("durationSeconds", "intermittentOnSeconds", "intermittentOffSeconds", "numSieves"):
         if recipe.get(key) is not None:
-            recipe[key] = int(recipe[key])
+            try:
+                recipe[key] = int(recipe[key])
+            except (TypeError, ValueError):
+                pass
+    if "sieveAnalysis" in recipe:
+        sa = recipe.get("sieveAnalysis")
+        if isinstance(sa, bool):
+            recipe["sieveAnalysis"] = sa
+        elif isinstance(sa, (int, float)):
+            recipe["sieveAnalysis"] = bool(sa)
+        else:
+            recipe["sieveAnalysis"] = str(sa).strip().lower() not in ("0", "false", "off", "no")
+    else:
+        recipe["sieveAnalysis"] = True
     if recipe.get("logicalSegments"):
         normalized = []
         for seg in recipe["logicalSegments"]:

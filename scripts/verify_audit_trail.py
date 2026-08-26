@@ -350,11 +350,11 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         if report.get("type") != expect_type:
             res.fail(f"{label}: report type {report.get('type')!r} != {expect_type!r}")
             ok = False
-        if str(report.get("status") or "") != "Completed":
-            res.fail(f"{label}: status {report.get('status')!r} != Completed")
+        if str(report.get("status") or "") != "Aborted":
+            res.fail(f"{label}: status {report.get('status')!r} != Aborted")
             ok = False
-        if str(report.get("reportApprovalStatus") or "").lower() != "approved":
-            res.fail(f"{label}: reportApprovalStatus not approved")
+        if str(report.get("reportApprovalStatus") or "").lower() != "aborted":
+            res.fail(f"{label}: reportApprovalStatus not aborted")
             ok = False
         if str(report.get("approvalRemarks") or "") != "power interruption":
             res.fail(f"{label}: approvalRemarks not power interruption")
@@ -362,16 +362,15 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         if str(report.get("approvedBy") or "") != "System":
             res.fail(f"{label}: approvedBy not System")
             ok = False
-        if str(report.get("approvalPassFail") or "").upper() != "FAIL":
-            res.fail(f"{label}: approvalPassFail not FAIL")
+        if expect_type == "test" and str(td.get("status") or "").lower() != "aborted":
+            res.fail(f"{label}: testData.status not aborted")
             ok = False
-        if expect_type == "test" and str(td.get("status") or "").lower() != "completed":
-            res.fail(f"{label}: testData.status not completed")
+        if expect_type == "validation" and str(td.get("status") or "").lower() != "aborted":
+            res.fail(f"{label}: testData.status not Aborted")
             ok = False
-        if expect_type == "validation" and str(td.get("status") or "").lower() != "fail":
-            res.fail(f"{label}: testData.status not Fail")
-            ok = False
-        dur = td.get("durationSeconds")
+        dur = td.get("actualElapsedSeconds")
+        if dur is None:
+            dur = td.get("elapsedSeconds")
         if dur is None:
             dur = td.get("durationSec")
         try:
@@ -379,7 +378,7 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         except (TypeError, ValueError):
             dur_n = -1
         if dur_n < expect_duration:
-            res.fail(f"{label}: durationSeconds {dur!r} expected >= {expect_duration}")
+            res.fail(f"{label}: actualElapsedSeconds {dur!r} expected >= {expect_duration}")
             ok = False
         start = td.get("testStartTime") or td.get("validationStartTime")
         end = td.get("testEndTime") or td.get("validationEndTime") or report.get("completedAt")
@@ -404,11 +403,14 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         derived = report.get("reportDerived") or {}
         if expect_type == "test" and derived:
             try:
-                if int(derived.get("durationSeconds") or -1) < expect_duration:
-                    res.fail(f"{label}: reportDerived.durationSeconds not preserved")
+                derived_dur = derived.get("actualElapsedSeconds")
+                if derived_dur is None:
+                    derived_dur = derived.get("durationSeconds")
+                if int(derived_dur or -1) < expect_duration:
+                    res.fail(f"{label}: reportDerived duration not preserved")
                     ok = False
             except (TypeError, ValueError):
-                res.fail(f"{label}: reportDerived.durationSeconds invalid")
+                res.fail(f"{label}: reportDerived duration invalid")
                 ok = False
         entries = audit_service.list_entries({"from": since_ms})
         pi = [e for e in entries if e.get("action") == "Power interruption"]
@@ -416,6 +418,9 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
             res.fail(f"{label}: missing Power interruption audit row")
             ok = False
         elif ok:
+            detail = str(pi[-1].get("details") or "")
+            if "aborted due to power interruption while" not in detail.lower():
+                res.note_warn(f"{label}: Power interruption audit detail missing expected wording")
             res.ok(f"{label}: recovered report id {report.get('id')} with Power interruption audit")
         return ok
 

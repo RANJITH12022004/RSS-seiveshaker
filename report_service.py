@@ -57,6 +57,12 @@ def generate_report(
         report["createdAt"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     if not report.get("completedAt"):
         report["completedAt"] = report["createdAt"]
+    if str(report.get("type") or "").strip().lower() == "validation" and not report.get("name"):
+        td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+        val_type = _validation_type_display(
+            td.get("validationType") or td.get("shakerMode") or "Validation"
+        )
+        report["name"] = f"Sieve Shaker Validation - {val_type}"
     report = enrich_report_context(report)
     return report
 
@@ -391,9 +397,17 @@ def build_test_report_derived(
 
     shaker_mode = td.get("shakerMode") or recipe.get("shakerMode") or "CONTINUOUS"
     amplitude = td.get("amplitude") if td.get("amplitude") is not None else recipe.get("amplitude")
-    duration_sec = td.get("durationSeconds") or recipe.get("durationSeconds")
+    duration_sec = td.get("actualElapsedSeconds")
+    if duration_sec is None:
+        duration_sec = td.get("elapsedSeconds")
+    if duration_sec is None:
+        duration_sec = td.get("durationSeconds") or recipe.get("durationSeconds")
     if duration_sec is None:
         duration_sec = test_duration_seconds(td)
+
+    set_dur = td.get("setDurationSeconds")
+    if set_dur is None:
+        set_dur = recipe.get("durationSeconds") or td.get("durationSeconds")
 
     test_no = "--"
     if report_id is not None:
@@ -411,11 +425,12 @@ def build_test_report_derived(
         "shakerMode": shaker_mode,
         "amplitude": amplitude if amplitude is not None else "--",
         "durationSeconds": duration_sec,
+        "setDurationSeconds": set_dur,
         "durationFormatted": format_duration_hhmmss(duration_sec),
         "intermittentOnSeconds": td.get("intermittentOnSeconds") or recipe.get("intermittentOnSeconds"),
         "intermittentOffSeconds": td.get("intermittentOffSeconds") or recipe.get("intermittentOffSeconds"),
         "logicalSegments": td.get("logicalSegments") or recipe.get("logicalSegments") or [],
-        "actualElapsedSeconds": td.get("actualElapsedSeconds"),
+        "actualElapsedSeconds": td.get("actualElapsedSeconds") if td.get("actualElapsedSeconds") is not None else duration_sec,
         "completedEarly": td.get("completedEarly"),
         "batchNumber": td.get("batchNumber") or recipe.get("batchNumber"),
         "productName": recipe.get("productName") or td.get("productName"),
@@ -604,126 +619,521 @@ def _fmt(v: Any, w: int = 0) -> str:
     return s.ljust(w) if w else s
 
 
-def _format_sieve_shaker_a4_text(report: Dict[str, Any]) -> str:
-    """Generate clean monospace A4 text for Sieve Shaker reports."""
+def _fmt_amp_display(raw: Any) -> str:
+    """Stored amplitude tenths (5–30) → display 0.5–3.0."""
+    if raw is None or raw == "":
+        return "n/a"
+    try:
+        v = float(raw)
+        if v >= 5:
+            return f"{v / 10.0:.1f}"
+        return f"{v:.1f}"
+    except (TypeError, ValueError):
+        return str(raw)
+
+
+def _sieve_analysis_on(report: Dict[str, Any], recipe: Dict[str, Any], td: Dict[str, Any]) -> bool:
+    for src in (td, recipe, report):
+        if isinstance(src, dict) and "sieveAnalysis" in src:
+            val = src.get("sieveAnalysis")
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)):
+                return bool(val)
+            s = str(val).strip().lower()
+            if s in ("0", "false", "off", "no"):
+                return False
+            if s in ("1", "true", "on", "yes"):
+                return True
+    return True
+
+
+def _split_iso_date_time(ts: Any) -> tuple:
+    """Return (date DD/MM/YYYY, time HH:MM:SS) for report display."""
+    s = str(ts or "").strip()
+    if not s:
+        return "n/a", "n/a"
+    s = s.replace("T", " ")
+    date_raw = s[:10] if len(s) >= 10 else ""
+    time_part = s[11:19] if len(s) >= 19 else "n/a"
+    if len(date_raw) == 10 and date_raw[4] == "-" and date_raw[7] == "-":
+        # YYYY-MM-DD → DD/MM/YYYY
+        date_part = "{}/{}/{}".format(date_raw[8:10], date_raw[5:7], date_raw[0:4])
+    elif date_raw:
+        date_part = date_raw.replace("-", "/")
+    else:
+        date_part = "n/a"
+    return date_part, time_part
+
+
+def _format_display_date(value: Any) -> str:
+    """Normalize date-only values to DD/MM/YYYY for report output."""
+    if value is None:
+        return "n/a"
+    s = str(value).strip()
+    if not s or s in ("N/A", "n/a", "--"):
+        return s if s else "n/a"
+    if "T" in s or ("-" in s and len(s) >= 10):
+        date_part, _ = _split_iso_date_time(s)
+        if date_part != "n/a":
+            return date_part
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s[:10], fmt).strftime("%d/%m/%Y")
+        except Exception:
+            continue
+    return s.replace("-", "/")
+
+
+def _instrument_header_lines(fs: Dict[str, Any], L, sep: str) -> list:
+    """Full machine/instrument block shared by test and validation text reports."""
+    return [
+        L("Company", fs.get("companyName", "n/a")),
+        L("Model No", fs.get("modelNo", "n/a")),
+        L("Serial No", fs.get("serialNo", "n/a")),
+        L("Location", fs.get("companyLocation", fs.get("location", "n/a"))),
+        L("Instrument ID", fs.get("instrumentId", "n/a")),
+        L("Last Validation", _format_display_date(fs.get("lastValidationDate"))),
+        L("Next Validation", _format_display_date(fs.get("nextValidationDate"))),
+        L("Instrument", "Sieve Shaker"),
+        sep,
+    ]
+
+
+def _append_sieve_analysis_text_lines(
+    lines: list,
+    analysis: Dict[str, Any],
+    *,
+    width: int,
+    sep: str,
+    include_graph_marker: bool = False,
+    graph_marker: str = "",
+) -> None:
+    """Append before/after and fraction/% sieve tables (4 dp weights)."""
+    if width >= 48:
+        lines += [
+            "BEFORE / AFTER WEIGHTS" if width < 48 else "  BEFORE / AFTER WEIGHTS",
+            sep,
+            f"  {'Sieve':<6} {'Size (µm)':<12} {'Before (g)':<12} {'After (g)':<12}",
+            sep,
+        ]
+        for row in analysis.get("rows") or []:
+            label = "PAN" if row.get("isPan") else str(row.get("index") or "")
+            size = "Receiver" if row.get("isPan") else str(row.get("size") if row.get("size") not in (None, "") else "n/a")
+            bw = float(row.get("before") or 0.0)
+            aw = float(row.get("after") or 0.0)
+            lines.append(f"  {label:<6} {size:<12} {bw:<12.4f} {aw:<12.4f}")
+        lines += [
+            sep,
+            "FRACTION / PERCENTAGE" if width < 48 else "  FRACTION / PERCENTAGE",
+            sep,
+            f"  {'Sieve':<6} {'Size (µm)':<12} {'Frac (g)':<12} {'%':<8}",
+            sep,
+        ]
+        total_frac = float(analysis.get("totalRetained") or 0.0)
+        total_pct = float(analysis.get("totalPercent") or 0.0)
+        for row in analysis.get("rows") or []:
+            label = "PAN" if row.get("isPan") else str(row.get("index") or "")
+            size = "Receiver" if row.get("isPan") else str(row.get("size") if row.get("size") not in (None, "") else "n/a")
+            frac = float(row.get("retained") or 0.0)
+            pct = float(row.get("percent") or 0.0)
+            lines.append(f"  {label:<6} {size:<12} {frac:<12.4f} {pct:<8.2f}")
+        lines.append(f"  {'Total':<6} {'':<12} {total_frac:<12.4f} {total_pct:<8.2f}")
+    else:
+        lines.append(f"{'#':>2} {'Size':>5} {'Bef':>7} {'Aft':>7}")
+        lines.append("-" * min(width, 32))
+        for row in analysis.get("rows") or []:
+            label = "P" if row.get("isPan") else str(row.get("index") or "")
+            size = "Pan" if row.get("isPan") else str(row.get("size") or "?")
+            bw = float(row.get("before") or 0.0)
+            aw = float(row.get("after") or 0.0)
+            lines.append(f"{label:>2} {size:>5} {bw:>7.4f} {aw:>7.4f}")
+        lines.append("")
+        lines.append(f"{'#':>2} {'Size':>5} {'Frac':>7} {'%':>5}")
+        lines.append("-" * min(width, 32))
+        for row in analysis.get("rows") or []:
+            label = "P" if row.get("isPan") else str(row.get("index") or "")
+            size = "Pan" if row.get("isPan") else str(row.get("size") or "?")
+            frac = float(row.get("retained") or 0.0)
+            pct = float(row.get("percent") or 0.0)
+            lines.append(f"{label:>2} {size:>5} {frac:>7.4f} {pct:>5.1f}")
+    if include_graph_marker and graph_marker:
+        # Legacy path with raster marker: horizontal chart only, then marker (usually unused)
+        try:
+            import print_service as _ps
+            chart_lines = _ps._format_sieve_horizontal_ascii_chart(analysis, width=width)
+            if chart_lines:
+                lines.append("-" * min(width, 32))
+                for cl in chart_lines:
+                    lines.append(cl)
+        except Exception:
+            pass
+        lines.append(graph_marker)
+    elif width < 48:
+        # Thermal: horizontal ## ## chart (no raster marker)
+        try:
+            import print_service as _ps
+            chart_lines = _ps._format_sieve_horizontal_ascii_chart(analysis, width=width)
+            if chart_lines:
+                lines.append("-" * min(width, 32))
+                for cl in chart_lines:
+                    lines.append(cl)
+        except Exception:
+            pass
+    else:
+        # A4: wide vertical ## chart
+        lines.append(sep)
+        try:
+            import print_service as _ps
+            chart_lines = _ps._format_sieve_vertical_ascii_chart(analysis, width=width)
+            for cl in chart_lines:
+                lines.append(cl)
+        except Exception:
+            pass
+
+
+def _validation_type_display(raw: Any) -> str:
+    """Normalize validation type labels: INTERMEDIATE legacy → Intermittent."""
+    s = str(raw or "").strip().upper()
+    if s in ("INTERMEDIATE", "INTERMITTENT", "I"):
+        return "Intermittent"
+    if s in ("CONTINUOUS", "C"):
+        return "Continuous"
+    if not s or s == "N/A":
+        return "n/a"
+    return str(raw).strip().title()
+
+
+def _mmss_from_seconds(sec: Any) -> str:
+    try:
+        n = int(sec)
+        if n < 0:
+            return "n/a"
+        return f"{n // 60:02d}:{n % 60:02d}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def build_sieve_shaker_validation_shared_lines(
+    report: Dict[str, Any],
+    *,
+    width: int = 56,
+) -> list:
+    """Validation-only text layout — no TEST PARAMETERS / sieve / sample weights."""
     r = dict(report or {})
+    recipe = r.get("recipe") or {}
+    td = r.get("testData") or r
+    fs = r.get("factorySettings") or {}
+
+    status = td.get("status") or r.get("status") or "n/a"
+    tested_by = (
+        td.get("testedBy")
+        or r.get("operatorName")
+        or r.get("operatedByUsername")
+        or "n/a"
+    )
+    operator_id = (
+        r.get("employeeId")
+        or td.get("employeeId")
+        or r.get("operatedByUsername")
+        or "--"
+    )
+
+    set_dur = td.get("setDurationSeconds")
+    if set_dur is None:
+        set_dur = recipe.get("durationSeconds") or td.get("durationSeconds") or 0
+    set_dur_str = _mmss_from_seconds(set_dur)
+
+    test_dur = td.get("actualElapsedSeconds")
+    if test_dur is None:
+        test_dur = td.get("elapsedSeconds")
+    if test_dur is None:
+        test_dur = 0
+        try:
+            from datetime import datetime as _dt
+            s_raw = td.get("validationStartTime") or td.get("testStartTime") or r.get("createdAt") or ""
+            e_raw = td.get("validationEndTime") or td.get("testEndTime") or r.get("completedAt") or ""
+            if s_raw and e_raw:
+                sdt = _dt.fromisoformat(str(s_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                edt = _dt.fromisoformat(str(e_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                if edt >= sdt:
+                    test_dur = int((edt - sdt).total_seconds())
+        except Exception:
+            test_dur = 0
+    test_dur_str = _mmss_from_seconds(test_dur)
+
+    ts_start = (
+        td.get("validationStartTime")
+        or td.get("testStartTime")
+        or r.get("createdAt")
+        or ""
+    )
+    ts_end = (
+        td.get("validationEndTime")
+        or td.get("testEndTime")
+        or r.get("completedAt")
+        or r.get("createdAt")
+        or ""
+    )
+    start_date, start_time = _split_iso_date_time(ts_start)
+    end_date, end_time = _split_iso_date_time(ts_end)
+
+    val_type = _validation_type_display(
+        recipe.get("validationType") or td.get("validationType") or td.get("shakerMode")
+    )
+    set_amp = _fmt_amp_display(
+        td.get("setAmplitude")
+        if td.get("setAmplitude") not in (None, "")
+        else (recipe.get("amplitude") or td.get("amplitude"))
+    )
+    actual_raw = td.get("actualAmplitude")
+    actual_amp = (
+        _fmt_amp_display(actual_raw)
+        if actual_raw not in (None, "", "not recorded")
+        else "not recorded"
+    )
+
+    approval_pf = r.get("approvalPassFail") or "PENDING"
+    approved_by = r.get("approvedBy") or "n/a"
+    approved_by_user = r.get("approvedByUsername") or "--"
+    approved_at_raw = str(r.get("approvedAt") or "")
+    approved_date, approved_time = _split_iso_date_time(approved_at_raw)
+    approval_remarks = r.get("approvalRemarks") or ""
+
+    SEP = "=" * width
+    sep = "-" * width
+
+    def L(label: str, value: Any) -> str:
+        if width >= 48:
+            return f"  {label:<14}: {value}"
+        return f"{label}: {value}"
+
+    lines = [
+        SEP,
+        "SIEVE SHAKER".center(width),
+        "Validation Report".center(width),
+        SEP,
+    ]
+    lines.extend(_instrument_header_lines(fs, L, sep))
+    lines += [
+        L("Start Date", start_date),
+        L("Start Time", start_time),
+        L("End Date", end_date),
+        L("End Time", end_time),
+        L("Status", status),
+        sep,
+        "VALIDATION PARAMETERS" if width < 48 else "  VALIDATION PARAMETERS",
+        sep,
+        L("Validation Type", val_type),
+        L("Set Amplitude", set_amp),
+        L("Actual Amplitude", actual_amp),
+        L("Set Duration", f"{set_dur_str} (MM:SS)"),
+        L("Test Duration", f"{test_dur_str} (MM:SS)"),
+        sep,
+        "APPROVAL" if width < 48 else "  APPROVAL",
+        sep,
+        L("Result", approval_pf),
+        L("Tested By", tested_by),
+        L("Tester ID", operator_id),
+        L("Approved By", approved_by),
+        L("Approver ID", approved_by_user),
+        L("Approved On", approved_date if approved_date != "n/a" else "n/a"),
+    ]
+    if approved_time and approved_time != "n/a" and width < 48:
+        lines.append(L("Approved Time", approved_time))
+    if approval_remarks:
+        lines.append(L("Remarks", approval_remarks))
+    lines.append(SEP)
+    return lines
+
+
+def build_sieve_shaker_shared_lines(
+    report: Dict[str, Any],
+    *,
+    width: int = 56,
+    include_graph_marker: bool = False,
+    graph_marker: str = "",
+) -> list:
+    """Shared field set for A4 preview and thermal — same data, width-aware wrapping later."""
+    r = dict(report or {})
+    if str(r.get("type") or "").strip().lower() == "validation":
+        return build_sieve_shaker_validation_shared_lines(r, width=width)
+
     recipe = r.get("recipe") or {}
     td = r.get("testData") or r
     fs = r.get("factorySettings") or {}
 
     product = recipe.get("productName") or td.get("productName") or "n/a"
     batch = recipe.get("batchNumber") or td.get("batchNumber") or "n/a"
-    amplitude = recipe.get("amplitude") or td.get("amplitude") or "n/a"
+    amplitude = _fmt_amp_display(recipe.get("amplitude") or td.get("amplitude"))
     shaker_mode = recipe.get("shakerMode") or td.get("shakerMode") or "n/a"
     weigh_method = td.get("weighMethod") or recipe.get("weighMethod") or "n/a"
     tested_by = td.get("testedBy") or r.get("operatedByUsername") or "n/a"
+    operator_id = (
+        r.get("employeeId")
+        or td.get("employeeId")
+        or r.get("operatedByUsername")
+        or "--"
+    )
     status = td.get("status") or "n/a"
 
     duration_sec = recipe.get("durationSeconds") or td.get("durationSeconds") or 0
-    duration_str = f"{int(duration_sec)//60:02d}:{int(duration_sec)%60:02d}" if duration_sec else "n/a"
+    try:
+        duration_str = f"{int(duration_sec)//60:02d}:{int(duration_sec)%60:02d}" if duration_sec else "n/a"
+    except (TypeError, ValueError):
+        duration_str = "n/a"
 
-    created_at = r.get("createdAt") or ""
-    date_str = created_at[:10] if len(created_at) >= 10 else "n/a"
-    time_str = created_at[11:19] if len(created_at) >= 19 else "n/a"
+    set_dur = td.get("setDurationSeconds")
+    if set_dur is None:
+        set_dur = recipe.get("durationSeconds") or td.get("durationSeconds") or 0
+    try:
+        set_dur_str = f"{int(set_dur)//60:02d}:{int(set_dur)%60:02d}" if set_dur else "n/a"
+    except (TypeError, ValueError):
+        set_dur_str = "n/a"
 
-    analysis = calculation_service.compute_sieve_analysis(
-        td if isinstance(td, dict) else {},
-        recipe if isinstance(recipe, dict) else {},
-    )
-    sample_weight = float(analysis.get("sampleWeight") or 0.0)
-    final_weight = float(analysis.get("totalRetained") or td.get("finalWeight") or 0.0)
+    test_dur = td.get("actualElapsedSeconds")
+    if test_dur is None:
+        test_dur = td.get("elapsedSeconds")
+    if test_dur is None:
+        # wall start→end fallback
+        test_dur = 0
+        try:
+            from datetime import datetime as _dt
+            s_raw = td.get("testStartTime") or r.get("createdAt") or ""
+            e_raw = td.get("testEndTime") or r.get("completedAt") or ""
+            if s_raw and e_raw:
+                sdt = _dt.fromisoformat(str(s_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                edt = _dt.fromisoformat(str(e_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                if edt >= sdt:
+                    test_dur = int((edt - sdt).total_seconds())
+        except Exception:
+            test_dur = 0
+    try:
+        test_dur_str = f"{int(test_dur)//60:02d}:{int(test_dur)%60:02d}" if test_dur is not None and test_dur != "" else "n/a"
+    except (TypeError, ValueError):
+        test_dur_str = "n/a"
+
+    ts_start = td.get("testStartTime") or r.get("createdAt") or ""
+    ts_end = td.get("testEndTime") or r.get("completedAt") or r.get("createdAt") or ""
+    start_date, start_time = _split_iso_date_time(ts_start)
+    end_date, end_time = _split_iso_date_time(ts_end)
+
+    analysis_on = _sieve_analysis_on(r, recipe if isinstance(recipe, dict) else {}, td if isinstance(td, dict) else {})
+    sample_weight = float(td.get("initialWeight") or td.get("sampleWeight") or 0.0)
+    final_weight = float(td.get("finalWeight") or 0.0)
+    analysis = {}
+    if analysis_on:
+        analysis = calculation_service.compute_sieve_analysis(
+            td if isinstance(td, dict) else {},
+            recipe if isinstance(recipe, dict) else {},
+        )
+        sample_weight = float(analysis.get("sampleWeight") or sample_weight)
+        final_weight = float(analysis.get("totalRetained") or final_weight)
 
     approval_pf = r.get("approvalPassFail") or "PENDING"
     approved_by = r.get("approvedBy") or "n/a"
-    approved_at = str(r.get("approvedAt") or "")[:10] or "n/a"
+    approved_at_raw = str(r.get("approvedAt") or "")
+    approved_date, approved_time = _split_iso_date_time(approved_at_raw)
     approval_remarks = r.get("approvalRemarks") or ""
 
-    w = 56  # line width
-    SEP = "=" * w
-    sep = "-" * w
+    SEP = "=" * width
+    sep = "-" * width
+    report_title = "SIEVE SHAKER Test Report" if width >= 48 else "Test Report"
+    company = str(fs.get("companyName") or "Raise Lab Equipment").strip() or "Raise Lab Equipment"
 
-    is_validation = str(r.get("type") or "").strip().lower() == "validation"
-    report_title = "    Validation Report" if is_validation else "       Test Report"
-    lines = [
-        SEP,
-        "  ELECTROMAGNETIC SIEVE SHAKER".center(w),
-        report_title.center(w),
-        SEP,
-        f"  Company        : {fs.get('companyName', 'n/a')}",
-        f"  Instrument     : Sieve Shaker",
+    # Pad helper for wide (A4) vs compact (thermal)
+    def L(label: str, value: Any) -> str:
+        if width >= 48:
+            return f"  {label:<14}: {value}"
+        return f"{label}: {value}"
+
+    if width >= 48:
+        lines = [
+            SEP,
+            company.center(width),
+            report_title.center(width),
+            SEP,
+        ]
+    else:
+        lines = [
+            SEP,
+            "SIEVE SHAKER".center(width),
+            "Test Report".center(width),
+            SEP,
+        ]
+    lines.extend(_instrument_header_lines(fs, L, sep))
+    lines += [
+        L("Product Name", product),
+        L("Batch No", batch),
+        L("Start Date", start_date),
+        L("Start Time", start_time),
+        L("End Date", end_date),
+        L("End Time", end_time),
+        L("Status", status),
         sep,
-        f"  Product Name   : {product}",
-        f"  Batch No       : {batch}",
-        f"  Test Date      : {date_str}    Time : {time_str}",
-        f"  Tested By      : {tested_by}",
-        f"  Status         : {status}",
+        "TEST PARAMETERS" if width < 48 else "  TEST PARAMETERS",
         sep,
-        "  TEST PARAMETERS",
-        sep,
-        f"  Shaker Mode    : {shaker_mode}",
-        f"  Amplitude      : {amplitude}",
-        f"  Duration       : {duration_str} (MM:SS)",
-        f"  Weigh Method   : {weigh_method}",
+        L("Shaker Mode", shaker_mode),
+        L("Amplitude", amplitude),
+        L("Set Duration", f"{set_dur_str} (MM:SS)"),
+        L("Test Duration", f"{test_dur_str} (MM:SS)"),
+        L("Weigh Method", weigh_method),
+        L("Sieve Analysis", "ON" if analysis_on else "OFF"),
     ]
-    if recipe.get("shakerMode") == "INTERMITTENT" or td.get("shakerMode") == "INTERMITTENT":
-        lines.append(f"  On Time        : {recipe.get('intermittentOnSeconds', td.get('intermittentOnSeconds','n/a'))} s")
-        lines.append(f"  Off Time       : {recipe.get('intermittentOffSeconds', td.get('intermittentOffSeconds','n/a'))} s")
-    if is_validation:
-        val_type = recipe.get("validationType") or td.get("validationType") or "n/a"
-        set_amp = td.get("setAmplitude") or amplitude
-        actual_amp = td.get("actualAmplitude") or "not recorded"
-        lines += [
-            sep,
-            "  VALIDATION PARAMETERS",
-            sep,
-            f"  Validation Type: {val_type}",
-            f"  Set Amplitude  : {set_amp}",
-            f"  Actual Amplitude: {actual_amp}",
-        ]
-    if not is_validation:
-        lines += [
-            sep,
-            "  SAMPLE WEIGHTS",
-            sep,
-            f"  Sample Weight  : {sample_weight:.4f} g",
-            f"  Final Weight   : {final_weight:.4f} g",
-            sep,
-            "  SIEVE ANALYSIS  (retained = after - before)",
-            sep,
-            f"  {'Sieve':<6} {'Size (µm)':<12} {'Before (g)':<12} {'After (g)':<12} {'Frac (g)':<10} {'%':<6}",
-            sep,
-        ]
-        for row in analysis.get("rows") or []:
-            label = "PAN" if row.get("isPan") else str(row.get("index") or "")
-            size = str(row.get("size") if row.get("size") not in (None, "") else "n/a")
-            bw = float(row.get("before") or 0.0)
-            aw = float(row.get("after") or 0.0)
-            frac = float(row.get("retained") or 0.0)
-            pct = float(row.get("percent") or 0.0)
-            lines.append(
-                f"  {label:<6} {size:<12} {bw:<12.4f} {aw:<12.4f} {frac:<10.4f} {pct:<6.2f}"
-            )
-        lines.append(sep)
-        # Dot-matrix A4 bar graph (same analysis as thermal; scaled to sample = 100%).
-        try:
-            import print_service as _ps
-            chart_lines = _ps._format_sieve_ascii_chart(analysis, width=w, bar_width=20)
-            for cl in chart_lines:
-                lines.append(f"  {cl}" if not cl.startswith(" ") else cl)
-        except Exception:
-            pass
+    mode_upper = str(shaker_mode).strip().upper()
+    if mode_upper == "LOGICAL":
+        lines.append(L("Run Time", f"{td.get('logicalRunSeconds', recipe.get('logicalRunSeconds', 'n/a'))} s"))
+        lines.append(L("Wait Time", f"{td.get('logicalWaitSeconds', recipe.get('logicalWaitSeconds', 'n/a'))} s"))
+        lines.append(L("Cycles", td.get("logicalCycles", recipe.get("logicalCycles", "n/a"))))
+
     lines += [
         sep,
-        "  APPROVAL",
+        "SAMPLE WEIGHTS" if width < 48 else "  SAMPLE WEIGHTS",
         sep,
-        f"  Result         : {approval_pf}",
-        f"  Approved By    : {approved_by}",
-        f"  Approved On    : {approved_at}",
+        L("Sample Weight", f"{sample_weight:.3f} g"),
     ]
+    if analysis_on:
+        lines.append(L("Final Weight", f"{final_weight:.4f} g"))
+    if analysis_on:
+        lines += [
+            sep,
+            "SIEVE ANALYSIS" if width < 48 else "  SIEVE ANALYSIS  (retained = after - before)",
+            sep,
+        ]
+        _append_sieve_analysis_text_lines(
+            lines,
+            analysis,
+            width=width,
+            sep=sep,
+            include_graph_marker=include_graph_marker,
+            graph_marker=graph_marker,
+        )
+    elif include_graph_marker and graph_marker:
+        lines.append(graph_marker)
+
+    approved_by_user = r.get("approvedByUsername") or "--"
+    lines += [
+        sep,
+        "APPROVAL" if width < 48 else "  APPROVAL",
+        sep,
+        L("Result", approval_pf),
+        L("Tested By", tested_by),
+        L("Tester ID", operator_id),
+        L("Approved By", approved_by),
+        L("Approver ID", approved_by_user),
+        L("Approved On", approved_date if approved_date != "n/a" else "n/a"),
+    ]
+    if approved_time and approved_time != "n/a" and width < 48:
+        lines.append(L("Approved Time", approved_time))
     if approval_remarks:
-        lines.append(f"  Remarks        : {approval_remarks}")
+        lines.append(L("Remarks", approval_remarks))
     lines.append(SEP)
-    return "\n".join(lines)
+    return lines
+
+
+def _format_sieve_shaker_a4_text(report: Dict[str, Any], width: int = 80) -> str:
+    """Generate clean monospace A4 text for Sieve Shaker reports (80-char wide with ASCII chart)."""
+    return "\n".join(build_sieve_shaker_shared_lines(report, width=width, include_graph_marker=False))
 
 
 def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
@@ -1007,14 +1417,144 @@ _RLE_LOGO_SVG = (
 )
 
 
-def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
-    """Build a rich HTML A4 report for the Sieve Shaker.
-    Handles both test reports (sieve table + bar chart) and validation reports."""
+def build_sieve_shaker_validation_report_html(report: Dict[str, Any]) -> str:
+    """HTML A4 layout for validation reports only (no test parameters / sieves)."""
     r = dict(report or {})
     recipe = r.get("recipe") or {}
     fs = r.get("factorySettings") or {}
     td = r.get("testData") or r
-    is_validation = str(r.get("type") or "").strip().lower() == "validation"
+    esc = html_module.escape
+
+    company = esc(str(fs.get("companyName") or ""))
+    model_no = esc(str(fs.get("modelNo") or ""))
+    serial_no = esc(str(fs.get("serialNo") or ""))
+    location = esc(str(fs.get("companyLocation") or fs.get("location") or ""))
+    inst_id = esc(str(fs.get("instrumentId") or ""))
+    last_val = esc(_format_display_date(fs.get("lastValidationDate")))
+    next_val = esc(_format_display_date(fs.get("nextValidationDate")))
+
+    status_raw = str(td.get("status") or r.get("status") or "")
+    test_status = esc(status_raw.title() if status_raw else "--")
+    remarks = esc(str(td.get("remarks") or r.get("remarks") or ""))
+
+    duration_sec = int(td.get("setDurationSeconds") or recipe.get("durationSeconds") or td.get("durationSeconds") or 0)
+    duration_str = f"{duration_sec // 60:02d}:{duration_sec % 60:02d}" if duration_sec else "--"
+    elapsed_sec = int(td.get("actualElapsedSeconds") or td.get("elapsedSeconds") or 0)
+    elapsed_str = f"{elapsed_sec // 60:02d}:{elapsed_sec % 60:02d}" if elapsed_sec else "--"
+
+    ts_start = td.get("validationStartTime") or td.get("testStartTime") or r.get("createdAt") or ""
+    ts_end = td.get("validationEndTime") or td.get("testEndTime") or r.get("completedAt") or r.get("createdAt") or ""
+    start_date, start_time = _split_iso_date_time(ts_start)
+    end_date, end_time = _split_iso_date_time(ts_end)
+
+    tested_by = esc(str(td.get("testedBy") or r.get("operatorName") or r.get("operatedByUsername") or "--"))
+    operator_id = esc(str(r.get("employeeId") or td.get("employeeId") or r.get("operatedByUsername") or "--"))
+
+    val_type = esc(_validation_type_display(
+        recipe.get("validationType") or td.get("validationType") or td.get("shakerMode")
+    ))
+    set_amp = esc(_fmt_amp_display(
+        td.get("setAmplitude") if td.get("setAmplitude") not in (None, "") else (recipe.get("amplitude") or td.get("amplitude"))
+    ))
+    actual_raw = td.get("actualAmplitude")
+    actual_amp = esc(
+        _fmt_amp_display(actual_raw) if actual_raw not in (None, "", "not recorded") else "not recorded"
+    )
+
+    approval_pf = esc(str(r.get("approvalPassFail") or "PENDING"))
+    approved_by = esc(str(r.get("approvedBy") or "--"))
+    approved_by_user = esc(str(r.get("approvedByUsername") or "--"))
+    approved_at_raw = str(r.get("approvedAt") or "")
+    approved_date, approved_time = _split_iso_date_time(approved_at_raw)
+    approval_remarks = esc(str(r.get("approvalRemarks") or ""))
+
+    return f'''<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Sieve Shaker Validation Report</title>
+<style>
+@page{{size:A4 portrait;margin:12mm 10mm;}}
+body{{margin:0;padding:0;color:#000;background:#fff;font-family:Arial,sans-serif;font-size:11pt;max-width:100%;}}
+.report-header{{display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid #000;padding-bottom:6px;margin-bottom:8px;}}
+.report-title{{font-size:13pt;font-weight:bold;text-align:center;flex:1;line-height:1.3;}}
+.report-subtitle{{font-size:9pt;font-weight:normal;display:block;color:#333;}}
+h3{{text-align:center;margin:10px 0 4px;font-size:11.5pt;background:#d0d0d0;padding:5px 8px;border-top:3px solid #444;border-bottom:1px solid #888;}}
+table{{border-collapse:collapse;width:100%;margin:3px 0;}}
+th,td{{border:1px solid #666;padding:3px 6px;font-size:9pt;}}
+th{{background:#e0e0e0;font-weight:bold;text-align:center;}}
+td{{text-align:left;}}
+.info-table .lbl{{font-weight:bold;width:20%;background:#f5f5f5;}}
+.pass{{color:#006600;font-weight:bold;}}
+.fail{{color:#cc0000;font-weight:bold;}}
+.pending{{color:#555;}}
+.footer-approval{{margin-top:14px;border:1px solid #000;padding:6px 8px;}}
+.footer-approval table td{{border:none;padding:2px 8px;font-size:9pt;}}
+</style>
+</head><body>
+
+<div class="report-header">
+  <div class="report-title">
+    Sieve Shaker
+    <span class="report-subtitle">Validation Report</span>
+  </div>
+</div>
+
+<h3>Instrument &amp; Company Information</h3>
+<table class="info-table">
+<tr><td class="lbl">Company:</td><td>{company}</td><td class="lbl">Model No:</td><td>{model_no}</td></tr>
+<tr><td class="lbl">Serial No:</td><td>{serial_no}</td><td class="lbl">Location:</td><td>{location}</td></tr>
+<tr><td class="lbl">Instrument ID:</td><td>{inst_id}</td><td class="lbl">Last Validation:</td><td>{last_val}</td></tr>
+<tr><td class="lbl">Next Validation:</td><td>{next_val}</td><td class="lbl"></td><td></td></tr>
+</table>
+
+<h3>Validation Information</h3>
+<table class="info-table">
+<tr><td class="lbl">Start Date:</td><td>{start_date}</td><td class="lbl">Start Time:</td><td>{start_time}</td></tr>
+<tr><td class="lbl">End Date:</td><td>{end_date}</td><td class="lbl">End Time:</td><td>{end_time}</td></tr>
+<tr><td class="lbl">Status:</td><td>{test_status}</td><td class="lbl">Remarks:</td><td>{remarks or "--"}</td></tr>
+</table>
+
+<h3>Validation Parameters</h3>
+<table class="info-table">
+<tr><td class="lbl">Validation Type:</td><td>{val_type}</td><td class="lbl">Set Amplitude:</td><td>{set_amp}</td></tr>
+<tr><td class="lbl">Actual Amplitude:</td><td>{actual_amp}</td><td class="lbl">Set Duration:</td><td>{duration_str} (mm:ss)</td></tr>
+<tr><td class="lbl">Test Duration:</td><td>{elapsed_str} (mm:ss)</td><td class="lbl"></td><td></td></tr>
+</table>
+
+<div class="footer-approval">
+<strong>Approval / Sign-off</strong>
+<table>
+<tr>
+  <td><b>Result:</b> <span class="{'pass' if approval_pf == 'PASS' else 'fail' if approval_pf == 'FAIL' else 'pending'}">{approval_pf}</span></td>
+  <td><b>Tested By:</b> {tested_by}</td>
+  <td><b>Tester ID:</b> {operator_id}</td>
+</tr>
+<tr>
+  <td><b>Approved By:</b> {approved_by}</td>
+  <td><b>Approver ID:</b> {approved_by_user}</td>
+  <td></td>
+</tr>
+<tr>
+  <td><b>Approval Date:</b> {approved_date}</td>
+  <td><b>Approval Time:</b> {approved_time}</td>
+  <td></td>
+</tr>
+{f'<tr><td colspan="3"><b>Remarks:</b> {approval_remarks}</td></tr>' if approval_remarks else ''}
+</table>
+</div>
+
+</body></html>'''
+
+
+def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
+    """Build a rich HTML A4 report for the Sieve Shaker.
+    Handles both test reports (sieve table + bar chart) and validation reports."""
+    r = dict(report or {})
+    if str(r.get("type") or "").strip().lower() == "validation":
+        return build_sieve_shaker_validation_report_html(r)
+    recipe = r.get("recipe") or {}
+    fs = r.get("factorySettings") or {}
+    td = r.get("testData") or r
+    is_validation = False
 
     esc = html_module.escape
 
@@ -1024,28 +1564,23 @@ def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
     serial_no    = esc(str(fs.get("serialNo") or ""))
     location     = esc(str(fs.get("companyLocation") or fs.get("location") or ""))
     inst_id      = esc(str(fs.get("instrumentId") or ""))
-    last_val     = esc(str(fs.get("lastValidationDate") or ""))
-    next_val     = esc(str(fs.get("nextValidationDate") or ""))
+    last_val     = esc(_format_display_date(fs.get("lastValidationDate")))
+    next_val     = esc(_format_display_date(fs.get("nextValidationDate")))
 
     # ── Report fields ─────────────────────────────────────────────────────────
     batch        = esc(str(recipe.get("batchNumber") or td.get("batchNumber") or "--"))
     product      = esc(str(recipe.get("productName") or td.get("productName") or "--"))
     created_at   = str(r.get("createdAt") or "")
-    test_date    = created_at[:10] if len(created_at) >= 10 else "--"
-    test_time    = created_at[11:19] if len(created_at) >= 19 else "--"
+    test_date, test_time = _split_iso_date_time(created_at)
     tested_by    = esc(str(td.get("testedBy") or r.get("operatedByUsername") or r.get("testedBy") or "--"))
     status_raw   = str(td.get("status") or "")
     test_status  = esc(status_raw.title() if status_raw else "--")
     remarks      = esc(str(td.get("remarks") or r.get("remarks") or ""))
 
     amplitude_raw = recipe.get("amplitude") or td.get("amplitude")
-    # Display amplitude as user-facing value (divide by 10 if stored as hardware units)
-    try:
-        amp_display = f"{float(amplitude_raw) / 10:.1f}" if amplitude_raw and float(amplitude_raw) >= 5 else str(amplitude_raw or "--")
-    except Exception:
-        amp_display = str(amplitude_raw or "--")
+    amp_display = _fmt_amp_display(amplitude_raw)
 
-    duration_sec = int(recipe.get("durationSeconds") or td.get("durationSeconds") or 0)
+    duration_sec = int(td.get("setDurationSeconds") or recipe.get("durationSeconds") or td.get("durationSeconds") or 0)
     duration_str = f"{duration_sec // 60:02d}:{duration_sec % 60:02d}" if duration_sec else "--"
     elapsed_sec  = int(td.get("actualElapsedSeconds") or td.get("elapsedSeconds") or 0)
     elapsed_str  = f"{elapsed_sec // 60:02d}:{elapsed_sec % 60:02d}" if elapsed_sec else "--"
@@ -1064,10 +1599,8 @@ def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
     # Test start/end timestamps
     ts_start = td.get("testStartTime") or r.get("createdAt") or ""
     ts_end   = td.get("testEndTime") or r.get("completedAt") or r.get("createdAt") or ""
-    start_date = ts_start[:10] if len(ts_start) >= 10 else "--"
-    start_time = ts_start[11:19] if len(ts_start) >= 19 else "--"
-    end_date   = ts_end[:10] if len(ts_end) >= 10 else "--"
-    end_time   = ts_end[11:19] if len(ts_end) >= 19 else "--"
+    start_date, start_time = _split_iso_date_time(ts_start)
+    end_date, end_time = _split_iso_date_time(ts_end)
 
     # Operator / tested-by fields
     operator_name    = esc(str(r.get("operatorName") or td.get("operatorName") or td.get("testedBy") or r.get("operatedByUsername") or "--"))
@@ -1077,147 +1610,191 @@ def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
     approved_by      = esc(str(r.get("approvedBy") or "--"))
     approved_by_user = esc(str(r.get("approvedByUsername") or "--"))
     approved_at_raw  = str(r.get("approvedAt") or "")
-    approved_date    = approved_at_raw[:10] if len(approved_at_raw) >= 10 else "--"
-    approved_time    = approved_at_raw[11:19] if len(approved_at_raw) >= 19 else "--"
+    approved_date, approved_time = _split_iso_date_time(approved_at_raw)
     approval_pf      = esc(str(r.get("approvalPassFail") or "PENDING"))
     approval_remarks = esc(str(r.get("approvalRemarks") or ""))
 
-    # ── Test-specific: sieve weights ─────────────────────────────────────────
-    analysis = calculation_service.compute_sieve_analysis(
-        td if isinstance(td, dict) else {},
-        recipe if isinstance(recipe, dict) else {},
-    )
-    num_sieves = int(analysis.get("numSieves") or 0)
-    sieve_sizes = [row.get("size") for row in (analysis.get("rows") or []) if not row.get("isPan")]
-    fractions = [float(row.get("retained") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
-    pan_weight = 0.0
-    for row in analysis.get("rows") or []:
-        if row.get("isPan"):
-            pan_weight = float(row.get("retained") or 0.0)
-            break
-    initial_weight = float(analysis.get("sampleWeight") or 0.0)
-    final_weight = float(analysis.get("totalRetained") or td.get("finalWeight") or 0.0)
-    before_weights = [float(row.get("before") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
-    after_weights = [float(row.get("after") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
+    set_amp     = esc(_fmt_amp_display(td.get("setAmplitude") if td.get("setAmplitude") not in (None, "") else amplitude_raw))
+    actual_raw_html = td.get("actualAmplitude")
+    actual_amp  = esc(_fmt_amp_display(actual_raw_html) if actual_raw_html not in (None, "", "--") else "--")
 
-    total_fraction = float(analysis.get("totalRetained") or 0.0)
+    analysis_on = _sieve_analysis_on(r, recipe if isinstance(recipe, dict) else {}, td if isinstance(td, dict) else {})
+
+    # ── Test-specific: sieve weights ─────────────────────────────────────────
+    analysis = {}
+    num_sieves = 0
+    sieve_sizes = []
+    fractions = []
+    pan_weight = 0.0
+    initial_weight = float(td.get("initialWeight") or td.get("sampleWeight") or 0.0)
+    final_weight = float(td.get("finalWeight") or 0.0)
+    before_weights = []
+    after_weights = []
+    total_fraction = final_weight
+    if analysis_on:
+        analysis = calculation_service.compute_sieve_analysis(
+            td if isinstance(td, dict) else {},
+            recipe if isinstance(recipe, dict) else {},
+        )
+        num_sieves = int(analysis.get("numSieves") or 0)
+        sieve_sizes = [row.get("size") for row in (analysis.get("rows") or []) if not row.get("isPan")]
+        fractions = [float(row.get("retained") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
+        pan_weight = 0.0
+        for row in analysis.get("rows") or []:
+            if row.get("isPan"):
+                pan_weight = float(row.get("retained") or 0.0)
+                break
+        initial_weight = float(analysis.get("sampleWeight") or initial_weight)
+        final_weight = float(analysis.get("totalRetained") or td.get("finalWeight") or final_weight)
+        before_weights = [float(row.get("before") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
+        after_weights = [float(row.get("after") or 0.0) for row in (analysis.get("rows") or []) if not row.get("isPan")]
+        total_fraction = float(analysis.get("totalRetained") or 0.0)
 
     # ── Validation-specific ──────────────────────────────────────────────────
     val_type    = esc(str(recipe.get("validationType") or td.get("validationType") or "--").title())
-    set_amp     = esc(str(td.get("setAmplitude") or amplitude_raw or "--"))
-    actual_amp  = esc(str(td.get("actualAmplitude") or "--"))
 
-    # ── Bar chart SVG (greyscale, test reports only) ──────────────────────────
+    # ── Bar chart SVG (outline bars, test reports only, analysis ON) ──────────
     bar_html = ""
-    if not is_validation and num_sieves > 0:
+    if analysis_on and num_sieves > 0:
         bar_values = list(analysis.get("fractions") or (fractions + [pan_weight]))
         bar_labels = list(analysis.get("labels") or ([str(i + 1) for i in range(num_sieves)] + ["PAN"]))
         # Scale to sample weight so bar height == % of powder (sums toward 100%).
         scale = initial_weight if initial_weight > 0 else (max(bar_values) if any(v > 0 for v in bar_values) else 1.0)
         if scale <= 0:
             scale = 1.0
-        bw = 38; bg = 10; ch = 200; pad_l = 50; pad_r = 20; pad_t = 20; pad_b = 30
-        cw = pad_l + (bw + bg) * len(bar_values) + pad_r
-        svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {cw} {ch}" width="100%" style="max-height:220px;border:1px solid #aaa;background:#fff;">'
-        # Y-axis gridlines and labels as % of sample
+        n_bars = len(bar_values)
+        # Use full available width: fixed viewBox width 560 so it fills the page.
+        ch = 220; pad_l = 52; pad_r = 12; pad_t = 28; pad_b = 36
+        cw = 560
+        chart_w = cw - pad_l - pad_r
+        # Bars fill the full chart width with small gaps between them
+        bg = max(4, chart_w // (n_bars * 8)) if n_bars > 0 else 8
+        bw = max(20, (chart_w - bg * (n_bars + 1)) // n_bars) if n_bars > 0 else 40
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {cw} {ch}" '
+            f'width="100%" style="display:block;height:260px;border:1px solid #888;background:#fff;">'
+        )
+        # Y-axis gridlines + labels (% of sample)
         for tick_pct in range(0, 101, 20):
             tick_val = scale * tick_pct / 100
-            y = pad_t + (ch - pad_t - pad_b) * (1 - tick_pct / 100)
-            svg += f'<line x1="{pad_l}" y1="{y:.1f}" x2="{cw - pad_r}" y2="{y:.1f}" stroke="#ddd" stroke-width="0.8"/>'
-            svg += f'<text x="{pad_l - 4}" y="{y + 3:.1f}" text-anchor="end" font-size="8" fill="#444">{tick_val:.1f}g</text>'
+            gy = pad_t + (ch - pad_t - pad_b) * (1 - tick_pct / 100)
+            svg += (
+                f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{cw - pad_r}" y2="{gy:.1f}" '
+                f'stroke="#ccc" stroke-width="0.7" stroke-dasharray="3,3"/>'
+            )
+            svg += (
+                f'<text x="{pad_l - 4}" y="{gy + 4:.1f}" text-anchor="end" '
+                f'font-size="9" fill="#333">{tick_val:.2f}g</text>'
+            )
         # Y-axis label
-        svg += f'<text x="10" y="{ch//2}" text-anchor="middle" font-size="9" fill="#333" transform="rotate(-90,10,{ch//2})">Retained (g)</text>'
-        # Bars
-        greys = ["#111","#333","#555","#666","#777","#888","#999","#aaa","#444"]
+        svg += (
+            f'<text x="10" y="{ch // 2}" text-anchor="middle" font-size="9" fill="#333" '
+            f'transform="rotate(-90,10,{ch // 2})">Retained (g)</text>'
+        )
+        # Outline-only bars + bold % labels
         for idx, (val, lbl) in enumerate(zip(bar_values, bar_labels)):
-            h = min(1.0, max(0.0, float(val) / scale)) * (ch - pad_t - pad_b)
-            x = pad_l + idx * (bw + bg)
-            y = pad_t + (ch - pad_t - pad_b) - h
-            color = greys[idx % len(greys)]
-            svg += f'<rect x="{x}" y="{y:.1f}" width="{bw}" height="{h:.1f}" fill="{color}"/>'
+            bar_h = min(1.0, max(0.0, float(val) / scale)) * (ch - pad_t - pad_b)
+            bx = pad_l + bg + idx * (bw + bg)
+            by = pad_t + (ch - pad_t - pad_b) - bar_h
             pct = (float(val) / initial_weight * 100) if initial_weight > 0 else 0
-            svg += f'<text x="{x + bw/2:.1f}" y="{y - 3:.1f}" text-anchor="middle" font-size="8" fill="#000">{pct:.1f}%</text>'
-            svg += f'<text x="{x + bw/2:.1f}" y="{ch - pad_b + 14}" text-anchor="middle" font-size="9" fill="#000">{lbl}</text>'
+            # Outline-only rectangle (no fill)
+            svg += (
+                f'<rect x="{bx}" y="{by:.1f}" width="{bw}" height="{bar_h:.1f}" '
+                f'fill="none" stroke="#000" stroke-width="1.5"/>'
+            )
+            # Bold percentage label above bar (always visible, black, large)
+            label_y = max(pad_t + 12, by - 5)
+            svg += (
+                f'<text x="{bx + bw / 2:.1f}" y="{label_y:.1f}" text-anchor="middle" '
+                f'font-size="11" font-weight="bold" fill="#000">{pct:.1f}%</text>'
+            )
+            # Sieve label below x-axis
+            svg += (
+                f'<text x="{bx + bw / 2:.1f}" y="{ch - pad_b + 16}" text-anchor="middle" '
+                f'font-size="10" fill="#000">{lbl}</text>'
+            )
+        # Axes
+        svg += (
+            f'<line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{ch - pad_b}" stroke="#000" stroke-width="1.2"/>'
+            f'<line x1="{pad_l}" y1="{ch - pad_b}" x2="{cw - pad_r}" y2="{ch - pad_b}" stroke="#000" stroke-width="1.2"/>'
+        )
         svg += '</svg>'
         bar_html = f'''
-<h3>Particle Size Distribution — Fraction per Sieve (% of sample)</h3>
-<div class="chart-section">{svg}</div>'''
+<h3 style="margin-bottom:4px;">Particle Size Distribution — Fraction per Sieve (% of sample)</h3>
+<div class="chart-section" style="width:100%;overflow:visible;">{svg}</div>'''
 
     # ── Sieve table rows ──────────────────────────────────────────────────────
     sieve_table_html = ""
-    if not is_validation:
-        rows = ""
+    if not is_validation and analysis_on:
+        before_rows = ""
+        frac_rows = ""
         for row in analysis.get("rows") or []:
             if row.get("isPan"):
-                continue
-            size = row.get("size") if row.get("size") not in (None, "") else "--"
+                size_label = "Receiver"
+                idx_label = "PAN"
+            else:
+                size_label = f"{row.get('size')} µm" if row.get("size") not in (None, "") else "--"
+                idx_label = str(row.get("index"))
             bw_val = float(row.get("before") or 0.0)
             aw_val = float(row.get("after") or 0.0)
             frac = float(row.get("retained") or 0.0)
             pct = float(row.get("percent") or 0.0)
-            rows += (
-                f"<tr><td>{row.get('index')}</td><td>{size} µm</td>"
-                f"<td>{bw_val:.4f}</td><td>{aw_val:.4f}</td>"
+            before_rows += (
+                f"<tr><td>{idx_label}</td><td>{size_label}</td>"
+                f"<td>{bw_val:.4f}</td><td>{aw_val:.4f}</td></tr>\n"
+            )
+            frac_rows += (
+                f"<tr><td>{idx_label}</td><td>{size_label}</td>"
                 f"<td>{frac:.4f}</td><td>{pct:.2f}%</td></tr>\n"
             )
-        pan_row = next((r for r in (analysis.get("rows") or []) if r.get("isPan")), None) or {}
-        pan_before = float(pan_row.get("before") or 0.0)
-        pan_after = float(pan_row.get("after") or 0.0)
-        pan_retained = float(pan_row.get("retained") or 0.0)
-        pan_pct = float(pan_row.get("percent") or 0.0)
-        rows += (
-            f"<tr><td>PAN</td><td>Receiver</td><td>{pan_before:.4f}</td>"
-            f"<td>{pan_after:.4f}</td><td>{pan_retained:.4f}</td><td>{pan_pct:.2f}%</td></tr>\n"
-        )
         total_pct = float(analysis.get("totalPercent") or 0.0)
-        rows += (
-            f'<tr style="font-weight:bold;background:#f0f0f0;"><td colspan="4">Total</td>'
+        frac_rows += (
+            f'<tr style="font-weight:bold;background:#f0f0f0;"><td colspan="2">Total</td>'
             f"<td>{total_fraction:.4f}</td><td>{total_pct:.2f}%</td></tr>\n"
         )
         sieve_table_html = f'''
-<h3>Sieve Analysis Data</h3>
+<h3>Sieve Analysis — Before / After Weights (g)</h3>
 <table>
-<thead><tr><th>Sieve No</th><th>Mesh Size</th><th>Before (g)</th><th>After (g)</th><th>Fraction (g)</th><th>Fraction (%)</th></tr></thead>
-<tbody>{rows}</tbody>
+<thead><tr><th>Sieve No</th><th>Mesh Size</th><th>Before (g)</th><th>After (g)</th></tr></thead>
+<tbody>{before_rows}</tbody>
+</table>
+<h3>Sieve Analysis — Fraction / Percentage</h3>
+<table>
+<thead><tr><th>Sieve No</th><th>Mesh Size</th><th>Fraction (g)</th><th>Fraction (%)</th></tr></thead>
+<tbody>{frac_rows}</tbody>
 </table>'''
 
     # ── Mode-specific extra params ────────────────────────────────────────────
     mode_extra = ""
     mode_upper = str(recipe.get("shakerMode") or td.get("shakerMode") or "").upper()
-    if mode_upper == "INTERMITTENT" and (on_sec or off_sec):
-        mode_extra = f'<tr><td class="lbl">On Time:</td><td>{on_sec} sec</td><td class="lbl">Off Time:</td><td>{off_sec} sec</td></tr>\n'
-    elif mode_upper == "LOGICAL" and (run_time or wait_time):
+    if mode_upper == "LOGICAL":
+        lr = recipe.get("logicalRunSeconds") or td.get("logicalRunSeconds") or run_time
+        lw = recipe.get("logicalWaitSeconds") or td.get("logicalWaitSeconds") or wait_time
+        lc = recipe.get("logicalCycles") or td.get("logicalCycles") or cycles
         mode_extra = (
-            f'<tr><td class="lbl">Run Time:</td><td>{run_time} sec</td>'
-            f'<td class="lbl">Wait Time:</td><td>{wait_time} sec</td></tr>\n'
-            f'<tr><td class="lbl">Cycles:</td><td>{cycles or "--"}</td><td></td><td></td></tr>\n'
+            f'<tr><td class="lbl">Run Time:</td><td>{lr if lr is not None else "--"} sec</td>'
+            f'<td class="lbl">Wait Time:</td><td>{lw if lw is not None else "--"} sec</td></tr>\n'
+            f'<tr><td class="lbl">Cycles:</td><td>{lc if lc is not None else "--"}</td><td></td><td></td></tr>\n'
         )
 
-    # ── Validation section ────────────────────────────────────────────────────
-    validation_section = ""
-    if is_validation:
-        validation_section = f'''
-<h3>Validation Parameters</h3>
-<table class="info-table">
-<tr><td class="lbl">Validation Type:</td><td>{val_type}</td><td class="lbl">Set Amplitude:</td><td>{set_amp}</td></tr>
-<tr><td class="lbl">Actual Amplitude:</td><td>{actual_amp}</td><td class="lbl">Test Duration:</td><td>{duration_str} (mm:ss)</td></tr>
-<tr><td class="lbl">Elapsed Time:</td><td>{elapsed_str} (mm:ss)</td><td class="lbl">Vibration Mode:</td><td>{shaker_mode}</td></tr>
-<tr><td class="lbl">Test Status:</td><td>{test_status}</td><td class="lbl">Remarks:</td><td>{remarks}</td></tr>
-</table>'''
-
-    # ── Test data section (test reports only) ─────────────────────────────────
+    # ── Test data section ─────────────────────────────────────────────────────
     # Final weight = total powder recovered (sum of fractions + pan) for mass balance
     final_weight_display = total_fraction if total_fraction > 0 else final_weight
-    test_data_section = ""
-    if not is_validation:
+    if analysis_on:
         test_data_section = f'''
 <h3>Test Data</h3>
 <table class="info-table">
-<tr><td class="lbl">Initial Sample Weight (g):</td><td>{initial_weight:.4f}</td><td class="lbl">Final Weight Recovered (g):</td><td>{final_weight_display:.4f}</td></tr>
+<tr><td class="lbl">Initial Sample Weight (g):</td><td>{initial_weight:.3f}</td><td class="lbl">Final Weight Recovered (g):</td><td>{final_weight_display:.4f}</td></tr>
 <tr><td class="lbl">Total Fraction (g):</td><td>{total_fraction:.4f}</td><td class="lbl">Weigh Method:</td><td>{weigh_method}</td></tr>
 </table>'''
+    else:
+        test_data_section = f'''
+<h3>Test Data</h3>
+<table class="info-table">
+<tr><td class="lbl">Initial Sample Weight (g):</td><td>{initial_weight:.3f}</td><td class="lbl">Weigh Method:</td><td>{weigh_method}</td></tr>
+</table>'''
 
-    report_type_label = "Validation Report" if is_validation else "Test Report"
+    report_type_label = "Test Report"
 
     html = f'''<!doctype html>
 <html><head><meta charset="utf-8">
@@ -1259,24 +1836,22 @@ td{{text-align:left;}}
 <tr><td class="lbl">Next Validation:</td><td>{next_val}</td><td class="lbl"></td><td></td></tr>
 </table>
 
-<h3>{'Validation' if is_validation else 'Test'} Information</h3>
+<h3>Test Information</h3>
 <table class="info-table">
 <tr><td class="lbl">Product Name:</td><td>{product}</td><td class="lbl">Batch No:</td><td>{batch}</td></tr>
-<tr><td class="lbl">Test Date:</td><td>{test_date.replace("-", "/")}</td><td class="lbl">Test Time:</td><td>{test_time}</td></tr>
-<tr><td class="lbl">Start Date:</td><td>{start_date.replace("-", "/")}</td><td class="lbl">Start Time:</td><td>{start_time}</td></tr>
-<tr><td class="lbl">End Date:</td><td>{end_date.replace("-", "/")}</td><td class="lbl">End Time:</td><td>{end_time}</td></tr>
-<tr><td class="lbl">Operator Name:</td><td>{operator_name}</td><td class="lbl">Operator ID:</td><td>{operator_id}</td></tr>
-<tr><td class="lbl">Tested By:</td><td>{tested_by}</td><td class="lbl">Status:</td><td>{test_status}</td></tr>
+<tr><td class="lbl">Test Date:</td><td>{test_date}</td><td class="lbl">Test Time:</td><td>{test_time}</td></tr>
+<tr><td class="lbl">Start Date:</td><td>{start_date}</td><td class="lbl">Start Time:</td><td>{start_time}</td></tr>
+<tr><td class="lbl">End Date:</td><td>{end_date}</td><td class="lbl">End Time:</td><td>{end_time}</td></tr>
+<tr><td class="lbl">Status:</td><td>{test_status}</td><td class="lbl"></td><td></td></tr>
 </table>
 
 <h3>Test Parameters</h3>
 <table class="info-table">
 <tr><td class="lbl">Vibration Mode:</td><td>{shaker_mode}</td><td class="lbl">Set Amplitude:</td><td>{amp_display}</td></tr>
-<tr><td class="lbl">Set Duration:</td><td>{duration_str} (mm:ss)</td><td class="lbl">Elapsed Time:</td><td>{elapsed_str} (mm:ss)</td></tr>
+<tr><td class="lbl">Set Duration:</td><td>{duration_str} (mm:ss)</td><td class="lbl">Test Duration:</td><td>{elapsed_str} (mm:ss)</td></tr>
 <tr><td class="lbl">No. of Sieves:</td><td>{num_sieves}</td><td class="lbl">Weigh Method:</td><td>{weigh_method}</td></tr>
 {mode_extra}
 </table>
-{validation_section}
 {test_data_section}
 {sieve_table_html}
 {bar_html}
@@ -1286,11 +1861,16 @@ td{{text-align:left;}}
 <table>
 <tr>
   <td><b>Result:</b> <span class="{'pass' if approval_pf == 'PASS' else 'fail' if approval_pf == 'FAIL' else 'pending'}">{approval_pf}</span></td>
-  <td><b>Approved By:</b> {approved_by}</td>
-  <td><b>Approver ID:</b> {approved_by_user}</td>
+  <td><b>Tested By:</b> {tested_by}</td>
+  <td><b>Tester ID:</b> {operator_id}</td>
 </tr>
 <tr>
-  <td><b>Approval Date:</b> {approved_date.replace("-", "/")}</td>
+  <td><b>Approved By:</b> {approved_by}</td>
+  <td><b>Approver ID:</b> {approved_by_user}</td>
+  <td></td>
+</tr>
+<tr>
+  <td><b>Approval Date:</b> {approved_date}</td>
   <td><b>Approval Time:</b> {approved_time}</td>
   <td></td>
 </tr>
@@ -1309,18 +1889,10 @@ def build_report_pdf_html(
     timestamp_kind: str = "printed",
 ) -> str:
     """
-    Build PDF HTML from the A4 text formatter output (====, ----, ****).
-    For sieve shaker reports (those with numSieves), uses the rich HTML template.
+    Build PDF HTML from the A4 text formatter (monospace).
+    Sieve and friability reports both use A4 text so download/export match print body.
+    Preview/download/export pass include_printed_timestamp=False (no Printed footer).
     """
-    r = report or {}
-    recipe = r.get("recipe") or {}
-    td = r.get("testData") or r
-    if (recipe.get("numSieves") or td.get("numSieves") or
-            td.get("sieveSizes") or td.get("sieveWeights") or
-            recipe.get("shakerMode") or td.get("shakerMode") or
-            recipe.get("validationType") or td.get("validationType")):
-        return build_sieve_shaker_report_html(r)
-
     import print_service
 
     enriched = enrich_report_context(dict(report or {}))
@@ -1334,11 +1906,11 @@ def build_report_pdf_html(
     css = (
         "@page{size:A4 portrait;margin:10mm;}"
         "body{margin:0;padding:3mm 0;color:#000;background:#fff;"
-        "font-family:'Courier New',Courier,monospace;font-size:11pt;line-height:1.25;"
+        "font-family:'Courier New',Courier,monospace;font-size:10.5pt;line-height:1.2;"
         "text-align:center;box-sizing:border-box;"
         "-webkit-print-color-adjust:exact;print-color-adjust:exact;}"
         ".a4-sheet{display:inline-block;width:190mm;max-width:190mm;text-align:left;vertical-align:top;}"
-        "pre{margin:0;white-space:pre-wrap;tab-size:4;letter-spacing:0;font-size:inherit;line-height:inherit;}"
+        "pre{margin:0;white-space:pre;overflow-x:auto;tab-size:4;letter-spacing:0;font-size:inherit;line-height:inherit;}"
     )
     return (
         '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>'

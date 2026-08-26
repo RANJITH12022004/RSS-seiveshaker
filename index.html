@@ -9,8 +9,8 @@
     <title>Sieve Shaker</title>
     <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
     <link rel="stylesheet" href="/keyboard.css">
-    <link rel="stylesheet" href="/styles.css?v=34" id="app-main-css"
-        onerror="(function(l){var n=parseInt(l.getAttribute('data-retry')||'0',10);if(n>=8)return;l.setAttribute('data-retry',String(n+1));setTimeout(function(){l.href='/styles.css?v=34&r='+(n+1)+'&t='+Date.now();},200*(n+1));})(this)">
+    <link rel="stylesheet" href="/styles.css?v=40" id="app-main-css"
+        onerror="(function(l){var n=parseInt(l.getAttribute('data-retry')||'0',10);if(n>=8)return;l.setAttribute('data-retry',String(n+1));setTimeout(function(){l.href='/styles.css?v=40&r='+(n+1)+'&t='+Date.now();},200*(n+1));})(this)">
 </head>
 
 <body>
@@ -389,8 +389,8 @@
                                 <input type="text" id="quick-batch-number" class="input-field" placeholder="">
                             </div>
                             <div class="form-group">
-                                <label>Amplitude (5–30)</label>
-                                <input type="number" id="quick-amplitude" class="input-field" min="0.5" max="3.0" step="0.5" value="1.5">
+                                <label>Amplitude (0.5–3.0)</label>
+                                <input type="text" id="quick-amplitude" class="input-field decimal-input" inputmode="decimal" data-decimal-input="true" placeholder="e.g. 1.5" value="1.5">
                             </div>
                             <div class="form-group" id="quick-duration-wrap">
                                 <label>Duration (MM:SS)</label>
@@ -409,7 +409,7 @@
                             <div class="form-group">
                                 <label>Number of Sieves (1–8)</label>
                                 <input type="number" id="quick-num-sieves" class="input-field" min="1" max="8" value="5"
-                                    onchange="renderSieveSizeFields('quick')">
+                                    onchange="clampNumSievesInput('quick')" onblur="clampNumSievesInput('quick')">
                             </div>
                             <div class="form-group">
                                 <label>Weight Method</label>
@@ -417,6 +417,21 @@
                                     <option value="automatic">Automatic (IO Scale)</option>
                                     <option value="manual">Manual (Type Weight)</option>
                                 </select>
+                            </div>
+                            <div class="form-group full-width">
+                                <label>Sieve Analysis</label>
+                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));" role="radiogroup" aria-label="Sieve Analysis">
+                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="sieve-analysis-on">
+                                        <input type="radio" name="quick-sieve-analysis" value="on" checked>
+                                        <h3>ON</h3>
+                                        <p>Weigh each sieve before/after</p>
+                                    </label>
+                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="sieve-analysis-off">
+                                        <input type="radio" name="quick-sieve-analysis" value="off">
+                                        <h3>OFF</h3>
+                                        <p>Sample weight only</p>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         <div id="quick-sieve-sizes-wrap" class="create-recipe-section">
@@ -510,8 +525,8 @@
                                 <input type="text" id="recipe-product-name" class="input-field" placeholder="">
                             </div>
                             <div class="form-group">
-                                <label>Amplitude (5–30)</label>
-                                <input type="number" id="recipe-amplitude" class="input-field" min="0.5" max="3.0" step="0.5" value="1.5">
+                                <label>Amplitude (0.5–3.0)</label>
+                                <input type="text" id="recipe-amplitude" class="input-field decimal-input" inputmode="decimal" data-decimal-input="true" placeholder="e.g. 1.5" value="1.5">
                             </div>
                             <div class="form-group" id="recipe-duration-wrap">
                                 <label>Duration (MM:SS)</label>
@@ -530,7 +545,7 @@
                             <div class="form-group">
                                 <label>Number of Sieves (1–8)</label>
                                 <input type="number" id="recipe-num-sieves" class="input-field" min="1" max="8" value="5"
-                                    onchange="renderSieveSizeFields('recipe')">
+                                    onchange="clampNumSievesInput('recipe')" onblur="clampNumSievesInput('recipe')">
                             </div>
                             <div class="form-group">
                                 <label>Weight Method</label>
@@ -538,6 +553,21 @@
                                     <option value="automatic">Automatic (IO Scale)</option>
                                     <option value="manual">Manual (Type Weight)</option>
                                 </select>
+                            </div>
+                            <div class="form-group full-width">
+                                <label>Sieve Analysis</label>
+                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));" role="radiogroup" aria-label="Sieve Analysis">
+                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="sieve-analysis-on">
+                                        <input type="radio" name="recipe-sieve-analysis" value="on" checked>
+                                        <h3>ON</h3>
+                                        <p>Weigh each sieve before/after</p>
+                                    </label>
+                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="sieve-analysis-off">
+                                        <input type="radio" name="recipe-sieve-analysis" value="off">
+                                        <h3>OFF</h3>
+                                        <p>Sample weight only</p>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         <div id="recipe-sieve-sizes-wrap" class="create-recipe-section">
@@ -961,9 +991,10 @@
                         <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen to approve the report. You cannot leave or log out until approved. If power is interrupted during a completed test awaiting approval, the report will be saved as Aborted (power interruption). Operator aborts stay Aborted.</div>
                         <div class="report-preview-container report-print-template" id="report-content">
                             <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;"></pre>
+                            <div id="report-html-preview" style="display: none;"></div>
                             <div id="report-legacy-preview">
                             <h1>RAISE LAB EQUIPMENT</h1>
-                            <h2>FRIABILITY TESTER - TEST REPORT</h2>
+                            <h2>SIEVE SHAKER - TEST REPORT</h2>
                             <h2 id="report-company-name">COMPANY NAME</h2>
                             <table class="report-ident-table">
                                 <tr>
@@ -1169,7 +1200,7 @@
                     <div class="reports-container">
                         <div class="report-preview-container recipe-print-container" id="recipe-print-content">
                             <h1>RAISE LAB EQUIPMENT</h1>
-                            <h2>Friability Tester - Recipe</h2>
+                            <h2>Sieve Shaker - Recipe</h2>
                             <h2 id="recipe-print-company-name">COMPANY NAME</h2>
                             <table class="report-ident-table">
                                 <tr>
@@ -1192,7 +1223,7 @@
                                 </tr>
                             </table>
                             <h3 id="recipe-print-product">Product Name</h3>
-                            <table>
+                            <table id="recipe-print-friability-rows">
                                 <tr>
                                     <th>USP</th>
                                     <td id="recipe-print-usp"></td>
@@ -1200,6 +1231,24 @@
                                 <tr>
                                     <th>Speed (RPM)</th>
                                     <td id="recipe-print-speed"></td>
+                                </tr>
+                            </table>
+                            <table id="recipe-print-sieve-rows" style="display:none;">
+                                <tr>
+                                    <th>Batch Number</th>
+                                    <td id="recipe-print-batch"></td>
+                                </tr>
+                                <tr>
+                                    <th>Vibration Mode</th>
+                                    <td id="recipe-print-mode"></td>
+                                </tr>
+                                <tr>
+                                    <th>Amplitude</th>
+                                    <td id="recipe-print-amplitude"></td>
+                                </tr>
+                                <tr>
+                                    <th>Sieve Analysis</th>
+                                    <td id="recipe-print-sieve-analysis"></td>
                                 </tr>
                             </table>
                             <h3 style="margin-top: 1rem;">Recipe Summary</h3>
@@ -1254,16 +1303,20 @@
                                 <h3>Continuous</h3>
                                 <p>Verify continuous shaking parameters</p>
                             </label>
-                            <label class="validation-type-settings-card create-recipe-card" data-procedure="intermediate-vt">
-                                <input type="radio" name="validation-type-select" value="INTERMEDIATE">
-                                <h3>Intermediate</h3>
-                                <p>Verify intermediate shaking parameters</p>
+                            <label class="validation-type-settings-card create-recipe-card" data-procedure="intermittent-vt">
+                                <input type="radio" name="validation-type-select" value="INTERMITTENT">
+                                <h3>Intermittent</h3>
+                                <p>Verify intermittent shaking parameters</p>
                             </label>
                         </div>
                         <div class="create-recipe-form-fields form-grid create-recipe-form-grid" style="margin-top:16px;grid-template-columns:1fr;">
                             <div class="form-group">
-                                <label>Set Amplitude (5–30)</label>
-                                <input type="number" id="val-set-amplitude" class="input-field" min="0.5" max="3.0" step="0.5" value="1.5">
+                                <label>Set Amplitude (0.5–3.0)</label>
+                                    <input type="text" id="val-set-amplitude" class="input-field decimal-input" inputmode="decimal" data-decimal-input="true" placeholder="e.g. 1.5" value="1.5">
+                            </div>
+                            <div class="form-group">
+                                <label>Set Duration (MM:SS)</label>
+                                <input type="text" id="val-set-duration" class="input-field" inputmode="numeric" placeholder="MM:SS" value="05:00">
                             </div>
                         </div>
                         <button type="button" class="btn btn-primary validation-start-btn validation-start-btn-lg" onclick="startShakerValidation()">Start Validation</button>
@@ -1282,6 +1335,11 @@
                             <div class="val-run-param">
                                 <span class="val-run-param-label">Set Amplitude</span>
                                 <span class="val-run-param-value" id="val-run-amplitude">15</span>
+                            </div>
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Set Duration</span>
+                                <span class="val-run-param-value" id="val-run-duration">05:00</span>
                             </div>
                         </div>
 
@@ -1306,10 +1364,10 @@
                                 <span class="ctrl-icon" aria-hidden="true">&#9654;</span>
                                 <span id="btn-validation-label">Start Validation</span>
                             </button>
-                            <div id="val-confirm-section" style="display:none;" class="form-grid" style="grid-template-columns:1fr;">
+                            <div id="val-confirm-section" class="form-grid" style="display:none;grid-template-columns:1fr;">
                                 <div class="form-group">
-                                    <label style="font-size:1.1rem;">Actual Amplitude (measured externally)</label>
-                                    <input type="number" id="val-actual-amplitude" class="input-field" min="1" max="50" placeholder="Enter measured amplitude">
+                                    <label style="font-size:1.1rem;">Actual Amplitude (0.5–3.0, measured externally)</label>
+                                    <input type="text" id="val-actual-amplitude" class="input-field decimal-input" inputmode="decimal" data-decimal-input="true" placeholder="e.g. 1.5">
                                 </div>
                                 <div class="form-group" style="margin-top:12px;">
                                     <button type="button" class="btn btn-primary" style="width:100%;font-size:1.1rem;" onclick="submitValidationResult()">Save &amp; View Report</button>
@@ -1509,7 +1567,6 @@
                             </div>
                         </div>
                         <div class="profile-actions">
-                            <button class="btn btn-blue btn-block" onclick="saveUserProfile()">Save</button>
                             <button class="btn btn-orange btn-block" onclick="goToPage('manage-members')">Manage Profiles</button>
                             <button class="btn btn-blue btn-block" onclick="openAddMember()">Add Members</button>
                         </div>
@@ -1924,11 +1981,11 @@
         </main>
     </div>
     <div id="keyboard-root"></div>
-    <script src="/keyboard.js?v=3"></script>
+    <script src="/keyboard.js?v=5"></script>
     <script src="/input-focus.js?v=1"></script>
-    <script src="/rbac.js?v=7"></script>
-    <script src="/script.js?v=89"></script>
-    <script src="/shaker_ui.js?v=1"></script>
+    <script src="/rbac.js?v=9"></script>
+    <script src="/script.js?v=100"></script>
+    <script src="/shaker_ui.js?v=10"></script>
 </body>
 
 </html>

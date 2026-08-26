@@ -1,39 +1,46 @@
-======================================================================
-                       TAP DENSITY TEST REPORT                        
-======================================================================
-Company: RAM
-Model No: THYY
-Serial No: THY
-Location: dd
-Instrument ID: qq
-Last Val: 18-05-2026
-Next Val Due: 18-08-2026
+================================================================================
+                              RAISE LAB EQUIPMENT                               
 
-Product: TEST
-Batch: dfyvh
-Test Start: 18/05/2026 17:32:59
-Completed: 18/05/2026 17:35:20
-Test Status: Aborted
-Test Duration: 140 s
+                             FRIABILITY TEST REPORT                             
+================================================================================
+Company: RAM                              Model No: THYY                        
+Serial No: THY                            Location: dd                          
+Instrument ID: qq                         Last Val: 18/05/2026                  
+Next Val Due: 18/08/2026                  
 
-======================================================================
+
+TEST INFORMATION
+--------------------------------------------------------------------------------
+Test No: 0002                             Product: TEST                         
+Batch: dfyvh                              Operator: Factory                     
+Test Type: Friability                     Test Method: COUNT                    
+Drops/Min: --                             Drop Height: --                       
+Total Taps: --                            Test Start: 18/05/2026 17:32:59       
+Completed: 18/05/2026 17:35:20            Test Status: Aborted                  
+Test Duration: 00:02:20                   
+
+================================================================================
 TEST DATA
-----------------------------------------------------------------------
- S    Vol(ml)      dVol       Bulk        Tap
-----------------------------------------------------------------------
- 1         20         0         10         10
- 2         20         0         10         10
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
+ S    W1 gms    W2 gms  Diff gms      Fri%       Trend    Result
+--------------------------------------------------------------------------------
+ 1        --        --        --        --          --        --
+ 2        --        --        --        --          --        --
+--------------------------------------------------------------------------------
 
-======================================================================
+================================================================================
 STATISTICS
-N/A
-**********************************************************************
+--------------------------------------------------------------------------------
+Bulk density (g/mL): Avg: 10 | Min: 10 | Max: 10
+Tap density (g/mL): Avg: 10 | Min: 10 | Max: 10
+Compressibility index (%): 0
+Hausner ratio: 1
 
-Operated by: Factory
-Employee ID: RLERLT
-Approval Result: --
-Approved By: --
+
+APPROVAL
+--------------------------------------------------------------------------------
+Operated by: Factory                      Employee ID: RLERLT                   
+Drum 1 Pass/Fail: --                      Drum 2 Pass/Fail: --                  
+Approved By: --                           Approver ID: --                       
 Approved At: --
-Approval Remarks:
 

@@ -8,6 +8,7 @@ Supports 4-decimal-place weight output.
 import threading
 import time
 import logging
+import os
 
 _logger = logging.getLogger(__name__)
 
@@ -27,6 +28,10 @@ _last_weight = None
 _last_raw = None
 _initialized = False
 _config = {}
+
+
+def _allow_scale_sim() -> bool:
+    return str(os.environ.get("ALLOW_SCALE_SIM", "0")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _open_gpio():
@@ -125,10 +130,11 @@ def read_weight(samples=5):
     global _last_weight, _last_raw
     with _hx_lock:
         if not _initialized or _h is None:
-            # Simulation fallback for development/testing
-            import random
-            sim = round(50.0 + random.uniform(-0.5, 0.5), 4)
-            return {"ok": True, "weight": sim, "raw": 0, "unit": "g", "simulated": True}
+            if _allow_scale_sim():
+                import random
+                sim = round(50.0 + random.uniform(-0.5, 0.5), 4)
+                return {"ok": True, "weight": sim, "raw": 0, "unit": "g", "simulated": True}
+            return {"ok": False, "weight": None, "raw": 0, "unit": "g", "simulated": True, "error": "Scale not ready"}
 
         readings = []
         for _ in range(samples):
@@ -138,11 +144,13 @@ def read_weight(samples=5):
             time.sleep(0.02)
 
         if not readings:
-            # HX711 not responding — return simulated value so wizard doesn't hang
-            import random
-            sim = round(50.0 + random.uniform(-0.5, 0.5), 4)
-            _logger.debug("hx711_service: HX711 not responding, returning simulated weight")
-            return {"ok": True, "weight": sim, "raw": 0, "unit": "g", "simulated": True, "warning": "HX711 DRDY timeout"}
+            # HX711 not responding — never invent a weight in production
+            if _allow_scale_sim():
+                import random
+                sim = round(50.0 + random.uniform(-0.5, 0.5), 4)
+                _logger.debug("hx711_service: HX711 not responding, returning simulated weight")
+                return {"ok": True, "weight": sim, "raw": 0, "unit": "g", "simulated": True, "warning": "HX711 DRDY timeout"}
+            return {"ok": False, "weight": None, "raw": 0, "unit": "g", "simulated": True, "error": "Scale not ready", "warning": "HX711 DRDY timeout"}
 
         avg_raw = sum(readings) / len(readings)
         _last_raw = avg_raw

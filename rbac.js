@@ -92,7 +92,7 @@ var PERMISSION_CARD_CATALOG = [
   { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create and edit recipes.', accent: 2 },
   { key: 'perm_recipe_approve', label: 'Recipe approval', description: 'Participate in recipe approval / verification.', accent: 3 },
   { key: 'perm_profile_admin', label: 'Profile management', description: 'Add, disable, edit, lock, unlock, and change roles for profiles.', accent: 4 },
-  { key: 'perm_validation_test', label: 'Validation test access', description: 'Run USP validation (25 RPM, 4 min, 100 rotations).', accent: 5 },
+  { key: 'perm_validation_test', label: 'Validation test access', description: 'Run sieve shaker validation (Continuous / Intermittent amplitude and duration verification).', accent: 5 },
   { key: 'perm_validation_report_approve', label: 'Validation report approval', description: 'Approve pending validation reports.', accent: 6 },
   { key: 'perm_datetime', label: 'Edit date and time', description: 'Change system date, time, and RTC.', accent: 7 },
   { key: 'perm_reports_view', label: 'View and print reports', description: 'Open, preview, and print reports.', accent: 8 },
@@ -358,6 +358,15 @@ function checkNavigationAccess(screenId) {
   if (screenId === 'report-preview') {
     if (typeof userCanOpenReportPreview === 'function') {
       return userCanOpenReportPreview(userObj);
+    }
+  }
+  // Audit-only profiles may open the Reports shell (Audit Trails filter only).
+  if (screenId === 'reports') {
+    if (typeof canOpenReportsShell === 'function') {
+      return canOpenReportsShell(userObj);
+    }
+    if (userObj && typeof userHasInternalKey === 'function') {
+      return userHasInternalKey(userObj, 'reports-view') || userHasInternalKey(userObj, 'audit-view');
     }
   }
   var featureKey = SCREEN_FEATURE_MAP[screenId] || screenId;

@@ -7,11 +7,16 @@ Reference-aligned A4 and thermal printing over serial.
 import logging
 import os
 import pathlib
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 import calculation_service
+
+# Serialize all printer I/O so a second Print press cannot interleave ESC/POS bytes.
+_PRINT_IO_LOCK = threading.Lock()
+_PRINT_BUSY = False
 
 try:
     import serial
@@ -364,9 +369,11 @@ def _is_power_interruption_report(report_data: Dict[str, Any], td: Dict[str, Any
         if "power interruption" in text:
             return True
     approved_by = str(report_data.get("approvedBy") or "").strip().lower()
-    return approved_by == "system" and str(report_data.get("reportApprovalStatus") or "").strip().lower() == "approved" and (
-        "power interruption" in str(report_data.get("approvalRemarks") or report_data.get("remarks") or "").lower()
-    )
+    st = str(report_data.get("reportApprovalStatus") or "").strip().lower()
+    remarks = str(report_data.get("approvalRemarks") or report_data.get("remarks") or "").lower()
+    if approved_by == "system" and "power interruption" in remarks and st in ("approved", "aborted"):
+        return True
+    return False
 
 
 def _wrap_lines(lines: list, width: int) -> list:
@@ -1272,14 +1279,17 @@ def _is_sieve_shaker_report(report_data: Dict[str, Any]) -> bool:
 
 
 def _fmt_amplitude_display(raw: Any) -> str:
-    """Convert stored amplitude to display value (divide by 10 if >= 5, i.e. stored as tenths)."""
+    """Convert stored amplitude tenths (5–30) to display mm (0.5–3.0).
+
+    Values already in display units (< 5) are shown as-is with one decimal when numeric.
+    """
     if raw is None or raw == "":
         return "n/a"
     try:
         v = float(raw)
         if v >= 5:
-            return f"{v / 10:.1f}"
-        return str(raw)
+            return f"{v / 10.0:.1f}"
+        return f"{v:.1f}"
     except (TypeError, ValueError):
         return str(raw)
 
@@ -1290,42 +1300,145 @@ def _ascii_bar(fraction: float, bar_width: int = 12) -> str:
     return "#" * filled + "-" * (bar_width - filled)
 
 
-def _format_sieve_ascii_chart(analysis: Dict[str, Any], width: int = 56, bar_width: int = 20) -> list:
-    """Monospace particle-size bar chart scaled to sample weight (100%)."""
-    sample = float(analysis.get("sampleWeight") or 0.0)
-    rows = list(analysis.get("rows") or [])
-    if not rows:
+def _sieve_chart_series(analysis: Dict[str, Any]) -> list:
+    """Return list of (x_label, percent) for sieves + pan. One ## block = 5%."""
+    series = []
+    for row in list(analysis.get("rows") or []):
+        pct = float(row.get("percent") or 0.0)
+        if row.get("isPan"):
+            label = "PAN"
+        else:
+            size = row.get("size")
+            label = str(size) if size not in (None, "") else str(row.get("label") or row.get("index") or "?")
+        series.append((label, pct))
+    return series
+
+
+def _pct_to_blocks(percent: float, step: float = 5.0) -> int:
+    """Number of ## cells for a retained %."""
+    if percent <= 0:
+        return 0
+    return max(0, int(round(float(percent) / step)))
+
+
+def _format_sieve_vertical_ascii_chart(analysis: Dict[str, Any], width: int = 80) -> list:
+    """Wide vertical ## bar chart for A4 (Y = % retained, X = sieve sizes).
+
+    One ## cell = 5% retained. Columns spread across the full plot width.
+    """
+    series = _sieve_chart_series(analysis)
+    if not series:
         return []
+    n = len(series)
+    step = 5
+    max_pct = max((p for _, p in series), default=0.0)
+    ymax = max(30, int(((max_pct + step - 1e-9) // step) * step))
+    if ymax < step:
+        ymax = step
+    blocks = [_pct_to_blocks(p, step) for _, p in series]
+
+    # Layout: "YY |" (4 chars) + plot area using remaining width
+    axis_w = 4  # "30 |"
+    plot_w = max(20, width - axis_w)
+    # Column pitch fills plot; each bar glyph is "##" (2) centered in col
+    col_w = max(4, plot_w // n)
+    # Recenter so total columns use full plot_w
+    used = col_w * n
+    pad_left = max(0, (plot_w - used) // 2)
+
+    def cell(i: int, filled: bool) -> str:
+        glyph = "##" if filled else "  "
+        return glyph.center(col_w)[:col_w]
+
     lines = [
-        "PARTICLE SIZE DISTRIBUTION".center(width),
-        f"(retained g / sample {sample:.4f} g)".center(width),
+        "PARTICLE SIZE DISTRIBUTION % RETAINED".center(width),
         "",
     ]
-    for row in rows:
-        retained = float(row.get("retained") or 0.0)
-        pct = float(row.get("percent") or 0.0)
-        label = str(row.get("label") or "")
-        # Scale bars to sample weight so visual height == % of powder.
-        frac_of_sample = (retained / sample) if sample > 0 else 0.0
-        bar = _ascii_bar(frac_of_sample, bar_width)
-        lines.append(f"{label:<4} [{bar}] {pct:6.2f}%  {retained:8.4f} g")
-    total = float(analysis.get("totalRetained") or 0.0)
-    total_pct = float(analysis.get("totalPercent") or 0.0)
-    lines.append("")
-    lines.append(f"Total recovered: {total:.4f} g ({total_pct:.2f}% of sample)")
+    for y in range(ymax, 0, -step):
+        row_chars = [" "] * pad_left
+        for i, b in enumerate(blocks):
+            row_chars.append(cell(i, b * step >= y))
+        plot = "".join(row_chars)
+        if len(plot) < plot_w:
+            plot = plot + (" " * (plot_w - len(plot)))
+        else:
+            plot = plot[:plot_w]
+        lines.append(f"{y:>2} |{plot}")
+
+    baseline = ("-" * plot_w)
+    lines.append(f" 0 +{baseline}")
+
+    # X labels centered under each column
+    xlab = [" "] * pad_left
+    for i, (lab, _) in enumerate(series):
+        lab_s = str(lab)[:col_w]
+        xlab.append(lab_s.center(col_w)[:col_w])
+    xlab_line = "".join(xlab)
+    if len(xlab_line) < plot_w:
+        xlab_line = xlab_line + (" " * (plot_w - len(xlab_line)))
+    else:
+        xlab_line = xlab_line[:plot_w]
+    lines.append(f"   {xlab_line}")
     return lines
+
+
+def _format_sieve_horizontal_ascii_chart(analysis: Dict[str, Any], width: int = 32) -> list:
+    """Thermal horizontal ## ## chart (one row per sieve). One ## = 5%."""
+    series = _sieve_chart_series(analysis)
+    if not series:
+        return []
+    step = 5
+    sep = "-" * min(width, 32)
+    lines = [
+        "Sieve  Retained (% of sample)"[:width],
+        sep,
+    ]
+    for lab, pct in series:
+        blocks = _pct_to_blocks(pct, step)
+        # Prefer spaced "## ##"; pack if needed for 32-col thermal
+        label = str(lab)[:6]
+        pct_str = f"{int(round(pct))}%" if abs(pct - round(pct)) < 0.05 else f"{pct:.1f}%"
+        # Match sample style: integer-ish display as 5%, 10%, ...
+        display_pct = f"{blocks * step}%"
+        spaced = " ".join(["##"] * blocks) if blocks else ""
+        packed = "##" * blocks if blocks else ""
+        # "150    " + bar + spaces + pct
+        prefix = f"{label:<6}"
+        suffix = f" {display_pct}"
+        avail = width - len(prefix) - len(suffix)
+        if avail < 0:
+            avail = 0
+        if len(spaced) <= avail:
+            bar = spaced.ljust(avail)
+        else:
+            bar = packed[:avail].ljust(avail)
+        line = (prefix + bar + suffix.lstrip()).rstrip()
+        if len(line) > width:
+            line = line[:width]
+        lines.append(line)
+    lines.append(sep)
+    return lines
+
+
+def _format_sieve_ascii_chart(analysis: Dict[str, Any], width: int = 56, bar_width: int = 20) -> list:
+    """Legacy horizontal [###---] chart — prefer vertical/horizontal ## charts."""
+    if width < 48:
+        return _format_sieve_horizontal_ascii_chart(analysis, width=width)
+    return _format_sieve_vertical_ascii_chart(analysis, width=width)
 
 
 _THERMAL_GRAPH_MARKER = "\x00__SIEVE_GRAPH__\x00"
 
 
 def _build_bar_chart_escpos(fracs: list, labels: list, sample_weight: float, width_dots: int = 384) -> bytes:
-    """Render a greyscale bar chart to ESC/POS GS v 0 raster bytes.
+    """Render an outline-only bar chart to ESC/POS GS v 0 raster bytes.
 
-    Bar height is scaled to sample_weight (100% of powder), not to the tallest bar.
+    Bars are white interior with a black outline so they are clearly readable
+    on thermal paper.  Percentage labels are always printed above each bar.
+    Bar height is scaled to sample_weight (100% of powder).
     """
     try:
-        from PIL import Image as _PILImage, ImageDraw as _PILDraw
+        from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFont as _PILFont
         import struct as _struct
     except ImportError:
         return b""
@@ -1333,30 +1446,41 @@ def _build_bar_chart_escpos(fracs: list, labels: list, sample_weight: float, wid
     if num_bars == 0:
         return b""
     img_w = width_dots
-    img_h = 120
-    margin_l, margin_r, margin_t, margin_b = 30, 10, 15, 25
+    img_h = 140
+    margin_l, margin_r, margin_t, margin_b = 30, 8, 22, 28
     chart_w = img_w - margin_l - margin_r
     chart_h = img_h - margin_t - margin_b
-    bar_gap = 4
-    bar_w = max(4, (chart_w - bar_gap * (num_bars + 1)) // num_bars)
-    img = _PILImage.new("L", (img_w, img_h), 255)
+    bar_gap = max(3, chart_w // (num_bars * 7))
+    bar_w = max(6, (chart_w - bar_gap * (num_bars + 1)) // num_bars)
+    img = _PILImage.new("L", (img_w, img_h), 255)  # white background
     draw = _PILDraw.Draw(img)
     # Full scale = sample weight so bars reflect % of powder (sum toward 100%).
     scale = float(sample_weight) if sample_weight and sample_weight > 0 else 0.0
     if scale <= 0:
         scale = max((v for v in fracs if v > 0), default=1.0) or 1.0
-    greys = [20, 60, 100, 140, 80, 40, 120, 160, 50]
+    # Try to load a slightly larger font for labels; fall back to default
+    try:
+        font_lbl = _PILFont.load_default(size=11)
+        font_pct = _PILFont.load_default(size=11)
+    except TypeError:
+        font_lbl = _PILFont.load_default()
+        font_pct = _PILFont.load_default()
     for i, (val, lbl) in enumerate(zip(fracs, labels)):
         bar_h = int(min(1.0, max(0.0, float(val) / scale)) * chart_h)
         x0 = margin_l + bar_gap + i * (bar_w + bar_gap)
         x1 = x0 + bar_w
         y0 = margin_t + chart_h - bar_h
         y1 = margin_t + chart_h
-        draw.rectangle([x0, y0, x1, y1], fill=greys[i % len(greys)])
-        pct_str = f"{(float(val) / float(sample_weight) * 100) if sample_weight > 0 else 0:.1f}%"
-        if bar_h > 6:
-            draw.text((x0 + bar_w // 2, max(margin_t + 4, y0 - 6)), pct_str, fill=0, anchor="mm")
-        draw.text((x0 + bar_w // 2, img_h - margin_b + 9), lbl, fill=0, anchor="mm")
+        # Outline-only rectangle: white fill, black border
+        draw.rectangle([x0, y0, x1, y1], fill=255, outline=0)
+        pct = (float(val) / float(sample_weight) * 100) if sample_weight > 0 else 0.0
+        pct_str = f"{pct:.1f}%"
+        # Always draw percentage above the bar (even for very short bars)
+        pct_y = max(margin_t + 8, y0 - 9)
+        draw.text((x0 + bar_w // 2, pct_y), pct_str, fill=0, anchor="mm", font=font_pct)
+        # Sieve label below x-axis
+        draw.text((x0 + bar_w // 2, img_h - margin_b + 10), lbl, fill=0, anchor="mm", font=font_lbl)
+    # Axes: Y-axis vertical line + X-axis baseline
     draw.line([(margin_l, margin_t), (margin_l, margin_t + chart_h)], fill=0, width=1)
     draw.line([(margin_l, margin_t + chart_h), (img_w - margin_r, margin_t + chart_h)], fill=0, width=1)
     # ESC/POS GS v 0: bit 1 = black dot (same polarity as thermal logo).
@@ -1370,179 +1494,26 @@ def _build_bar_chart_escpos(fracs: list, labels: list, sample_weight: float, wid
 
 
 def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -> str:
-    """Compact 32-char thermal formatter for Sieve Shaker reports.
-    Returns text with _THERMAL_GRAPH_MARKER embedded where the chart image should be printed."""
-    r = dict(report_data or {})
-    recipe = r.get("recipe") or {}
-    td = r.get("testData") or r
-    fs = r.get("factorySettings") or {}
-
-    is_validation = str(r.get("type") or "").strip().lower() == "validation"
-
-    SEP = "=" * width
-    dash = "-" * width
-
-    # Header — logo image is sent separately before this text; no text branding line
-    sub_title = "Validation Report" if is_validation else "Test Report"
-    lines = [
-        SEP,
-        "SIEVE SHAKER".center(width),
-        sub_title.center(width),
-        SEP,
-    ]
-
-    # Company / instrument info
-    lines += [
-        f"Company: {fs.get('companyName', 'N/A')}",
-        f"Model: {fs.get('modelNo', 'N/A')}",
-        f"Serial: {fs.get('serialNo', 'N/A')}",
-        f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
-        f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-        f"Last Val: {_format_display_date(fs.get('lastValidationDate', 'N/A'))}",
-        f"Next Val Due: {_format_display_date(fs.get('nextValidationDate', 'N/A'))}",
-        dash,
-    ]
-
-    # Report info
-    product = recipe.get("productName") or td.get("productName") or "N/A"
-    batch = recipe.get("batchNumber") or td.get("batchNumber") or "N/A"
-    created_at = r.get("createdAt") or ""
-    _ts_date, _ts_time = _split_ts_date_and_time(created_at if created_at else None)
-    date_str = (_ts_date if _ts_date != "--" else "N/A").replace("-", "/")
-    time_str = _ts_time if _ts_time != "--" else "N/A"
-    tested_by = td.get("testedBy") or r.get("operatedByUsername") or "N/A"
-    operator_name = r.get("operatorName") or td.get("operatorName") or tested_by
-    operator_id = r.get("employeeId") or td.get("employeeId") or r.get("operatedByUsername") or "N/A"
-
-    # Test start/end timestamps
-    ts_start = td.get("testStartTime") or r.get("createdAt") or ""
-    ts_end = td.get("testEndTime") or r.get("completedAt") or r.get("approvedAt") or ""
-    _start_date, _start_time = _split_ts_date_and_time(ts_start if ts_start else None)
-    _end_date, _end_time = _split_ts_date_and_time(ts_end if ts_end else None)
-    start_date_str = (_start_date if _start_date != "--" else "N/A").replace("-", "/")
-    start_time_str = _start_time if _start_time != "--" else "N/A"
-    end_date_str = (_end_date if _end_date != "--" else "N/A").replace("-", "/")
-    end_time_str = _end_time if _end_time != "--" else "N/A"
-
-    lines += [
-        "REPORT INFORMATION",
-        f"Product: {product}",
-        f"Batch: {batch}",
-        f"test startDate: {start_date_str}",
-        f"test startTime: {start_time_str}",
-        f"test endDate: {end_date_str}",
-        f"test endTime: {end_time_str}",
-        dash,
-    ]
-
-    # Test parameters
-    shaker_mode = recipe.get("shakerMode") or td.get("shakerMode") or "N/A"
-    amplitude_raw = recipe.get("amplitude") or td.get("amplitude")
-    # Sieve shaker stores amplitude directly in mm (e.g. 20 = 20 mm), not in tenths
+    """Thermal text matching sample layout (32-col); horizontal ## chart, no raster marker."""
     try:
-        amplitude_disp = f"{float(amplitude_raw):.0f}" if amplitude_raw not in (None, "") else "N/A"
-    except (TypeError, ValueError):
-        amplitude_disp = str(amplitude_raw) if amplitude_raw is not None else "N/A"
-    duration_sec = recipe.get("durationSeconds") or td.get("durationSeconds") or 0
-    try:
-        duration_sec = int(duration_sec)
-        duration_str = f"{duration_sec // 60:02d}:{duration_sec % 60:02d}"
-    except (TypeError, ValueError):
-        duration_str = "N/A"
-    weigh_method = td.get("weighMethod") or recipe.get("weighMethod") or "N/A"
+        from report_service import build_sieve_shaker_shared_lines
+    except ImportError:
+        build_sieve_shaker_shared_lines = None
 
-    lines += [
-        "TEST PARAMETERS",
-        f"Vibration Mode: {shaker_mode}",
-        f"Amplitude: {amplitude_disp}",
-        f"Duration: {duration_str} (MM:SS)",
-        f"Weigh Method: {weigh_method}",
-    ]
-
-    mode_upper = str(shaker_mode).strip().upper()
-    if mode_upper == "INTERMITTENT":
-        on_s = recipe.get("intermittentOnSeconds") or td.get("intermittentOnSeconds") or "N/A"
-        off_s = recipe.get("intermittentOffSeconds") or td.get("intermittentOffSeconds") or "N/A"
-        lines += [f"On Time: {on_s} s", f"Off Time: {off_s} s"]
-    elif mode_upper == "LOGICAL":
-        lines += [
-            f"Run Time: {td.get('logicalRunSeconds', recipe.get('logicalRunSeconds', 'N/A'))} s",
-            f"Wait Time: {td.get('logicalWaitSeconds', recipe.get('logicalWaitSeconds', 'N/A'))} s",
-            f"Cycles: {td.get('logicalCycles', recipe.get('logicalCycles', 'N/A'))}",
-        ]
-
-    if is_validation:
-        val_type = recipe.get("validationType") or td.get("validationType") or "N/A"
-        set_amp = td.get("setAmplitude") or amplitude_disp
-        actual_amp = td.get("actualAmplitude") or "not recorded"
-        lines += [
-            dash,
-            "VALIDATION PARAMETERS",
-            f"Val Type: {val_type}",
-            f"Set Amplitude: {set_amp}",
-            f"Actual Amplitude: {actual_amp}",
-        ]
+    if build_sieve_shaker_shared_lines is not None:
+        lines = build_sieve_shaker_shared_lines(
+            report_data,
+            width=width,
+            include_graph_marker=False,
+            graph_marker="",
+        )
     else:
-        # Sample weights + sieve analysis table + bitmap chart marker
-        analysis = calculation_service.compute_sieve_analysis(td if isinstance(td, dict) else {}, recipe)
-        sample_weight = float(analysis.get("sampleWeight") or 0.0)
-        total_recovered = float(analysis.get("totalRetained") or 0.0)
-        lines += [
-            dash,
-            "SAMPLE WEIGHTS",
-            f"Sample: {sample_weight:.4f} g",
-            dash,
-            "SIEVE ANALYSIS",
-        ]
+        lines = ["SIEVE SHAKER", "Report unavailable"]
 
-        # Compact sieve table: retained mass = after - before
-        col_hdr = f"{'#':>2} {'Size':>5} {'Wt(g)':>7} {'%':>5}"
-        lines.append(col_hdr)
-        lines.append("-" * len(col_hdr))
-
-        for row in analysis.get("rows") or []:
-            label = "P" if row.get("isPan") else str(row.get("index") or "")
-            size = "Pan" if row.get("isPan") else str(row.get("size") or "?")
-            retained = float(row.get("retained") or 0.0)
-            pct = float(row.get("percent") or 0.0)
-            lines.append(f"{label:>2} {size:>5} {retained:>7.4f} {pct:>5.2f}")
-
-        lines += [
-            f"{'Tot':>2} {' ':>5} {total_recovered:>7.4f} {float(analysis.get('totalPercent') or 0):>5.2f}",
-            f"Final Wt: {total_recovered:.4f} g",
-        ]
-
-        # Bitmap chart is printed by print_thermal_report at this marker.
-        lines.append(_THERMAL_GRAPH_MARKER)
-
-    # Approval
-    approval_pf = r.get("approvalPassFail") or td.get("approvalPassFail") or "PENDING"
-    approved_by = _strip_approver_role_label(r.get("approvedBy"))
-    approved_by_user = str(r.get("approvedByUsername") or "N/A")
-    approved_at_raw = str(r.get("approvedAt") or "")
-    approved_date = (approved_at_raw[:10] if len(approved_at_raw) >= 10 else "N/A").replace("-", "/")
-    approved_time = approved_at_raw[11:19] if len(approved_at_raw) >= 19 else "N/A"
-    approval_remarks = r.get("approvalRemarks") or ""
-
-    lines += [
-        SEP,
-        "APPROVAL",
-        f"Result: {approval_pf}",
-        f"Operator: {operator_name}",
-        f"Operator ID: {operator_id}",
-        f"Approved By: {approved_by}",
-        f"Approver ID: {approved_by_user}",
-        f"Approval Date: {approved_date}",
-        f"Approval Time: {approved_time}",
-    ]
-    if approval_remarks:
-        lines.append(f"Remarks: {approval_remarks}")
-    lines += [SEP]
-
-    # Compact: fit to width, collapse consecutive blanks, strip trailing blanks.
-    # Printed Date/Time is appended once by format_for_thermal_printer / format_for_a4_printer.
     flat: list = []
     for line in lines:
+        if line == _THERMAL_GRAPH_MARKER:
+            continue
         flat.extend(_fit_thermal_line(str(line), width))
     return "\n".join(_compact_thermal_lines(flat, width))
 
@@ -1648,7 +1619,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             return _format_sieve_shaker_thermal(report_data, width=width)
         try:
             import report_service as _rs
-            return _rs._format_sieve_shaker_a4_text(report_data)
+            return _rs._format_sieve_shaker_a4_text(report_data, width=width)
         except Exception:
             pass
 
@@ -1848,12 +1819,12 @@ def format_for_a4_printer(
 
 
 def _report_timestamp_footer_lines(kind: str = "printed") -> list:
-    """Date/time footer from device RTC. kind: 'printed' | 'exported'."""
+    """Date/time footer from device RTC. kind: 'printed' | 'exported'. Dates use DD/MM/YYYY."""
     try:
         import rtc_service
 
         payload = rtc_service.get_device_wall_datetime_payload()
-        pdate = payload.get("date") or "--"
+        pdate = str(payload.get("date") or "--").replace("-", "/")
         ptime = payload.get("time") or "--"
     except Exception:
         now = datetime.now()
@@ -1881,12 +1852,11 @@ def format_for_thermal_printer(
 
 
 def format_for_export(report_data: Dict[str, Any], *, thermal: bool = False) -> str:
-    """A4/thermal text with Exported Date/Time at the end (for USB/file export)."""
+    """A4/thermal text for USB/file export — no Printed/Exported footer (stamp only on live print)."""
     if thermal:
-        return format_for_thermal_printer(report_data, timestamp_kind="exported")
-    return format_for_a4_printer(
-        report_data, include_printed_timestamp=True, timestamp_kind="exported"
-    )
+        text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
+        return text + _thermal_trailing_feed()
+    return format_for_a4_printer(report_data, include_printed_timestamp=False)
 
 
 def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_dir: pathlib.Path) -> None:
@@ -1944,12 +1914,16 @@ def print_report_from_file(txt_path: pathlib.Path, port: str, baud: int, printer
 
 
 def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = None) -> Dict[str, Any]:
+    global _PRINT_BUSY
     port = printer_port or _a4_port
     baud = _a4_baud
     if not serial:
         return {"success": False, "error": "pyserial not installed", "port": port}
     if not _port_exists(port):
         return {"success": False, "error": f"A4 printer port not found: {port}", "port": port}
+    if not _PRINT_IO_LOCK.acquire(blocking=False):
+        return {"success": False, "error": "Printer busy — wait for the current print to finish.", "port": port}
+    _PRINT_BUSY = True
     try:
         text = format_for_a4_printer(report_data).rstrip() + "\r\n\x0c"
         ser = _open_a4_serial(port, baud)
@@ -1964,83 +1938,33 @@ def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = N
             ser.close()
     except Exception as e:
         return {"success": False, "error": str(e), "port": port}
+    finally:
+        _PRINT_BUSY = False
+        _PRINT_IO_LOCK.release()
 
 
-_SIEVE_LOGO_BIN_PATH = pathlib.Path(__file__).parent / "assets" / "rle_logo_thermal.bin"
-_SIEVE_LOGO_PNG_PATHS = (
-    # Prefer the thermal-ready icon (white background, dark logo) — print as-is, no invert.
-    pathlib.Path(__file__).parent / "assets" / "imiages" / "apple-touch-icon.png",
-    pathlib.Path(__file__).parent / "assets" / "rle_logo_nobg.png",
-    pathlib.Path(__file__).parent / "assets" / "rle_logo.png",
-)
-_THERMAL_LOGO_WIDTH_DOTS = 384  # Full width on common 58mm ESC/POS heads
-
-
-def _build_thermal_logo_escpos(width_dots: int = _THERMAL_LOGO_WIDTH_DOTS) -> bytes:
-    """Build a full-width ESC/POS GS v 0 raster from the reference logo PNG (no invert)."""
-    try:
-        from PIL import Image as _PILImage
-        import struct as _struct
-    except ImportError:
-        return b""
-
-    src = None
-    for path in _SIEVE_LOGO_PNG_PATHS:
-        if path.is_file():
-            src = path
-            break
-    if src is None:
-        return b""
-
-    try:
-        img = _PILImage.open(src)
-        if img.mode in ("RGBA", "LA"):
-            bg = _PILImage.new("RGBA", img.size, (255, 255, 255, 255))
-            bg.paste(img, mask=img.split()[-1])
-            img = bg.convert("L")
-        else:
-            img = img.convert("L")
-
-        width_dots = max(8, int(width_dots) - (int(width_dots) % 8))
-        w, h = img.size
-        if w <= 0 or h <= 0:
-            return b""
-        new_h = max(1, int(round(h * (width_dots / float(w)))))
-        img = img.resize((width_dots, new_h), _PILImage.LANCZOS)
-        # ESC/POS GS v 0: bit 1 = black dot. Dark ink → 1, white paper → 0 (do not invert).
-        bw = img.point(lambda p: 0 if p > 127 else 1, "1")
-        bw_w, bw_h = bw.size
-        bytes_per_row = (bw_w + 7) // 8
-        cmd = bytearray(b"\x1d\x76\x30\x00")
-        cmd += _struct.pack("<HH", bytes_per_row, bw_h)
-        cmd += bw.tobytes()
-        return bytes(cmd)
-    except Exception:
-        return b""
-
-
-def _send_thermal_logo(ser, baud: int) -> None:
-    """Send a full-width thermal logo (PNG raster preferred; prebuilt .bin fallback)."""
-    try:
-        logo_bytes = _build_thermal_logo_escpos(_THERMAL_LOGO_WIDTH_DOTS)
-        if not logo_bytes and _SIEVE_LOGO_BIN_PATH.is_file():
-            logo_bytes = _SIEVE_LOGO_BIN_PATH.read_bytes()
-        if not logo_bytes:
-            return
-        # Centre-align: ESC a 1
-        ser.write(b"\x1b\x61\x01")
-        ser.flush()
-        time.sleep(0.05)
-        _send_bytes_chunked(ser, logo_bytes, baud, chunk_size=64)
-        # Feed 1 line, restore left-align: ESC a 0
-        ser.write(b"\n\x1b\x61\x00")
-        ser.flush()
-        time.sleep(0.1)
-    except Exception:
-        pass  # If logo fails, continue with text
+def _sieve_analysis_enabled(report_data: Dict[str, Any]) -> bool:
+    """True unless recipe/testData explicitly disables sieve analysis."""
+    r = dict(report_data or {})
+    td = r.get("testData") if isinstance(r.get("testData"), dict) else {}
+    recipe = r.get("recipe") if isinstance(r.get("recipe"), dict) else {}
+    for src in (td, recipe, r):
+        if "sieveAnalysis" in src:
+            val = src.get("sieveAnalysis")
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)):
+                return bool(val)
+            s = str(val).strip().lower()
+            if s in ("0", "false", "off", "no"):
+                return False
+            if s in ("1", "true", "on", "yes"):
+                return True
+    return True
 
 
 def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str] = None) -> Dict[str, Any]:
+    global _PRINT_BUSY
     port = printer_port or _thermal_port
     baud = _thermal_baud
     if not serial:
@@ -2049,50 +1973,192 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         port = _probe_port(port, THERMAL_CANDIDATES)
     except FileNotFoundError as e:
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
+    if not _PRINT_IO_LOCK.acquire(blocking=False):
+        return {"success": False, "error": "Printer busy — wait for the current print to finish.", "port": port}
+    _PRINT_BUSY = True
     try:
         text = format_for_thermal_printer(report_data)
-        is_sieve = _is_sieve_shaker_report(report_data)
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)
             time.sleep(0.2)
             _send_thermal_logo(ser, baud)
-            if is_sieve and _THERMAL_GRAPH_MARKER in text:
-                # Split text around the graph marker and send chart image in between
-                before_graph, after_graph = text.split(_THERMAL_GRAPH_MARKER, 1)
-                _send_text_to_thermal(ser, before_graph.rstrip("\n"), baud)
-                # Build and send bar chart image scaled to sample weight.
-                r = dict(report_data or {})
-                td = r.get("testData") or r
-                recipe = r.get("recipe") or {}
-                try:
-                    analysis = calculation_service.compute_sieve_analysis(
-                        td if isinstance(td, dict) else {},
-                        recipe if isinstance(recipe, dict) else {},
-                    )
-                    fracs = list(analysis.get("fractions") or [])
-                    labels = list(analysis.get("labels") or [])
-                    sample_weight = float(analysis.get("sampleWeight") or 0.0)
-                    chart_cmd = _build_bar_chart_escpos(fracs, labels, sample_weight)
-                    if chart_cmd:
-                        ser.write(b"\x1b\x61\x01")  # centre align
-                        ser.flush()
-                        time.sleep(0.05)
-                        _send_bytes_chunked(ser, chart_cmd, baud, chunk_size=64)
-                        ser.write(b"\n\x1b\x61\x00")  # feed + left align
-                        ser.flush()
-                        time.sleep(0.1)
-                except Exception:
-                    pass
-                _send_text_to_thermal(ser, after_graph.lstrip("\n"), baud)
-            else:
-                _send_text_to_thermal(ser, text, baud)
+            # Sieve reports: horizontal ## ASCII chart is already in the text body.
+            # Do not inject ESC/POS raster graphs (logo unchanged).
+            safe_text = text.replace(_THERMAL_GRAPH_MARKER, "")
+            _send_text_to_thermal(ser, safe_text, baud)
             time.sleep(0.5)
             return {"success": True, "port": port}
         finally:
             ser.close()
     except Exception as e:
         return {"success": False, "error": str(e), "port": port}
+    finally:
+        _PRINT_BUSY = False
+        _PRINT_IO_LOCK.release()
+
+
+_SIEVE_LOGO_BIN_PATH = pathlib.Path(__file__).parent / "assets" / "rle_logo_thermal.bin"
+_ASSETS_DIR = pathlib.Path(__file__).resolve().parent / "assets"
+# LeakTest-CFR aligned: prefer wide rle_logo, apple-touch as fallback (never first).
+_THERMAL_LOGO_CANDIDATES = (
+    _ASSETS_DIR / "rle_logo.png",
+    _ASSETS_DIR / "rle_logo_nobg.png",
+    _ASSETS_DIR / "imiages" / "rle_logo.png",
+    _ASSETS_DIR / "apple-touch-icon.png",
+    _ASSETS_DIR / "imiages" / "apple-touch-icon.png",
+)
+THERMAL_RASTER_WIDTH = 384  # 58mm ESC/POS paper width (multiple of 8)
+THERMAL_LOGO_PRINT_WIDTH = 240  # Centered — not full-bleed (avoids tall/noisy square icons)
+_thermal_logo_raster_cache: Optional[bytes] = None
+_thermal_logo_raster_mtime: Optional[float] = None
+
+try:
+    from PIL import Image as _PILImage
+except ImportError:
+    _PILImage = None
+
+
+def _resolve_thermal_logo_path() -> Optional[pathlib.Path]:
+    for path in _THERMAL_LOGO_CANDIDATES:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _pil_to_escpos_raster(img: Any, width_pixels: int) -> bytes:
+    """Convert a PIL image to ESC/POS GS v 0 raster bytes (width multiple of 8)."""
+    if _PILImage is None:
+        raise RuntimeError("Pillow (PIL) is required for thermal logo printing")
+    width_pixels = max(8, int(width_pixels) - (int(width_pixels) % 8))
+    if img.mode != "L":
+        img = img.convert("L")
+    w, h = img.size
+    if w != width_pixels:
+        new_h = max(1, int(round(h * (width_pixels / float(w)))))
+        img = img.resize((width_pixels, new_h), _PILImage.NEAREST)
+        w, h = img.size
+    # Dark pixels print (1), light stay white (0)
+    bw = img.point(lambda p: 0 if p > 160 else 1, "1")
+    m = 0
+    xL = (w // 8) & 0xFF
+    xH = ((w // 8) >> 8) & 0xFF
+    yL = h & 0xFF
+    yH = (h >> 8) & 0xFF
+    header = bytes([0x1D, 0x76, 0x30, m, xL, xH, yL, yH])
+    row_bytes = w // 8
+    raw = bw.tobytes()
+    out = bytearray(header)
+    for row in range(h):
+        start = row * row_bytes
+        out.extend(raw[start : start + row_bytes])
+    return bytes(out)
+
+
+def _build_centered_thermal_logo_raster(
+    logo_path: pathlib.Path,
+    *,
+    paper_width: int = THERMAL_RASTER_WIDTH,
+    logo_width: int = THERMAL_LOGO_PRINT_WIDTH,
+) -> bytes:
+    """Trim, scale with NEAREST, center on paper — LeakTest/DT clean mono thermal logo."""
+    if _PILImage is None:
+        raise RuntimeError("Pillow (PIL) is required for thermal logo printing")
+    paper_width = max(8, int(paper_width) - (int(paper_width) % 8))
+    logo_width = max(8, int(logo_width) - (int(logo_width) % 8))
+    logo_width = min(logo_width, paper_width)
+
+    src = _PILImage.open(logo_path)
+    src.load()
+
+    if src.mode in ("1", "L"):
+        mono = src.convert("L")
+    else:
+        # Color brand art → mono for thermal (DT color→black rules)
+        rgba = src.convert("RGBA")
+        gray = _PILImage.new("L", rgba.size, 255)
+        px = rgba.load()
+        gp = gray.load()
+        w0, h0 = rgba.size
+        for y in range(h0):
+            for x in range(w0):
+                r, g, b, a = px[x, y]
+                if a < 20:
+                    continue
+                if r < 50 and g < 55 and b < 70:
+                    continue
+                if (r + g + b) < 90:
+                    continue
+                if (r + g + b) > 120 or max(r, g, b) > 100:
+                    gp[x, y] = 0
+        mono = gray
+
+    inv = _PILImage.eval(mono, lambda p: 255 - p)
+    bbox = inv.getbbox()
+    if bbox:
+        mono = mono.crop(bbox)
+
+    # Hard threshold before upscale so NEAREST does not invent mid-grays
+    mono = mono.point(lambda p: 0 if p < 160 else 255)
+    new_h = max(1, int(round(mono.height * (logo_width / float(max(1, mono.width))))))
+    mono = mono.resize((logo_width, new_h), _PILImage.NEAREST)
+
+    canvas = _PILImage.new("L", (paper_width, mono.height), 255)
+    ox = max(0, (paper_width - logo_width) // 2)
+    canvas.paste(mono, (ox, 0))
+    return _pil_to_escpos_raster(canvas, paper_width)
+
+
+def _thermal_logo_raster_bytes() -> Optional[bytes]:
+    """Cached ESC/POS raster for thermal header logo (LeakTest pipeline)."""
+    global _thermal_logo_raster_cache, _thermal_logo_raster_mtime
+    if _PILImage is None:
+        _log.warning("Pillow not installed; thermal logo skipped")
+        return None
+    path = _resolve_thermal_logo_path()
+    if path is None:
+        _log.warning("Thermal logo missing (checked rle_logo.png, apple-touch-icon.png)")
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    if _thermal_logo_raster_cache is not None and _thermal_logo_raster_mtime == mtime:
+        return _thermal_logo_raster_cache
+    try:
+        raster = _build_centered_thermal_logo_raster(path)
+        _thermal_logo_raster_cache = raster
+        _thermal_logo_raster_mtime = mtime
+        return raster
+    except Exception as e:
+        _log.warning("Thermal logo raster failed: %s", e)
+        return None
+
+
+def _send_thermal_logo(ser, baud: int) -> bool:
+    """Send LeakTest-style centered thermal logo (prebuilt .bin fallback)."""
+    try:
+        raster = _thermal_logo_raster_bytes()
+        if not raster and _SIEVE_LOGO_BIN_PATH.is_file():
+            raster = _SIEVE_LOGO_BIN_PATH.read_bytes()
+        if not raster:
+            return False
+        chunk_size = 512 if baud <= 9600 else 1024
+        pause = 0.08 if baud <= 9600 else 0.05
+        for i in range(0, len(raster), chunk_size):
+            ser.write(raster[i : i + chunk_size])
+            ser.flush()
+            if i + chunk_size < len(raster):
+                time.sleep(pause)
+        ser.write(b"\n")
+        ser.flush()
+        time.sleep(0.05)
+        return True
+    except Exception:
+        return False
 
 
 def _recipe_mode_label(recipe: Dict[str, Any]) -> str:
@@ -2150,6 +2216,66 @@ def _recipe_time_display(recipe: Dict[str, Any]) -> str:
     return "--"
 
 
+def _is_sieve_shaker_recipe(recipe: Dict[str, Any]) -> bool:
+    if not isinstance(recipe, dict):
+        return False
+    return recipe.get("numSieves") is not None or bool(recipe.get("shakerMode"))
+
+
+def _sieve_recipe_duration_display(recipe: Dict[str, Any]) -> str:
+    sec = recipe.get("durationSeconds")
+    if sec in (None, ""):
+        return "--"
+    try:
+        total = max(0, int(sec))
+        minutes, seconds = divmod(total, 60)
+        return f"{minutes:02d}:{seconds:02d}"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _append_sieve_shaker_recipe_lines(lines: list, recipe: Dict[str, Any], thermal: bool) -> None:
+    name = recipe.get("productName") or recipe.get("name") or "N/A"
+    batch = recipe.get("batchNumber") or recipe.get("batch")
+    analysis_on = recipe.get("sieveAnalysis")
+    if isinstance(analysis_on, bool):
+        analysis_label = "ON" if analysis_on else "OFF"
+    else:
+        analysis_label = "OFF" if str(analysis_on or "").strip().lower() in ("0", "false", "off", "no") else "ON"
+
+    lines.append(f"Recipe Name: {name}")
+    if batch not in (None, ""):
+        lines.append(f"Batch No: {batch}")
+    lines.append(f"Vibration Mode: {_cell_str(recipe.get('shakerMode'))}")
+    lines.append(f"Amplitude: {_fmt_amplitude_display(recipe.get('amplitude'))} mm")
+    lines.append(f"Duration: {_sieve_recipe_duration_display(recipe)} (MM:SS)")
+    lines.append(f"No. of Sieves: {_cell_str(recipe.get('numSieves'))}")
+    lines.append(f"Sieve Analysis: {analysis_label}")
+    weigh_method = recipe.get("weighMethod")
+    if weigh_method not in (None, ""):
+        lines.append(f"Weigh Method: {str(weigh_method).title()}")
+    sizes = recipe.get("sieveSizes")
+    if isinstance(sizes, list) and sizes:
+        lines.append(f"Sieve Sizes: {', '.join(str(s) for s in sizes)} um")
+    if str(recipe.get("shakerMode") or "").strip().upper() == "LOGICAL":
+        for key, label in (
+            ("logicalRunSeconds", "Run Time"),
+            ("logicalWaitSeconds", "Wait Time"),
+            ("logicalCycles", "Cycles"),
+        ):
+            val = recipe.get(key)
+            if val not in (None, ""):
+                unit = " sec" if "Seconds" in key else ""
+                lines.append(f"{label}: {_cell_str(val)}{unit}")
+
+    approved_by = recipe.get("recipeApprovedBy")
+    if approved_by not in (None, ""):
+        lines.append(f"Recipe Approved By: {_strip_approver_role_label(approved_by)}")
+    approver_id = recipe.get("recipeApprovedByUsername")
+    if approver_id not in (None, ""):
+        lines.append(f"Approver ID: {approver_id}")
+
+
 def _append_recipe_detail_lines(lines: list, recipe: Dict[str, Any], thermal: bool) -> None:
     mode = str(recipe.get("uspMode") or recipe.get("usp") or "").strip().upper()
     completion = str(recipe.get("customCompletionMode") or "COUNT").strip().upper()
@@ -2190,22 +2316,27 @@ def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     sep = _thermal_sep("=", width) if thermal else ("=" * width)
     sep_dash = _thermal_sep("-", width) if thermal else ("-" * width)
     fs = recipe_data.get("factorySettings") or {}
+    is_sieve = _is_sieve_shaker_recipe(recipe_data)
+    title = "SIEVE SHAKER RECIPE" if is_sieve else "FRIABILITY RECIPE"
     lines = [
         sep,
-        "FRIABILITY RECIPE" if thermal else "FRIABILITY RECIPE".center(width),
+        title if thermal else title.center(width),
         "",
         f"Company: {fs.get('companyName', 'N/A')}",
         f"Model No: {fs.get('modelNo', 'N/A')}",
         f"Serial No: {fs.get('serialNo', 'N/A')}",
         f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
         f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-        f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
-        f"Next Val Due: {fs.get('nextValidationDate', 'N/A')}",
+        f"Last Val: {_format_display_date(fs.get('lastValidationDate', 'N/A'))}",
+        f"Next Val Due: {_format_display_date(fs.get('nextValidationDate', 'N/A'))}",
         sep,
         "RECIPE DETAILS",
         sep_dash if thermal else "",
     ]
-    _append_recipe_detail_lines(lines, recipe_data, thermal)
+    if is_sieve:
+        _append_sieve_shaker_recipe_lines(lines, recipe_data, thermal)
+    else:
+        _append_recipe_detail_lines(lines, recipe_data, thermal)
     lines.append(sep)
     if thermal:
         flat: list = []

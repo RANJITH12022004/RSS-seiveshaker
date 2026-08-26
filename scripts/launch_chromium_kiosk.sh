@@ -43,10 +43,12 @@ detect_ozone_platform() {
 
 force_desktop_size() {
   if [[ -x "$APP_ROOT/scripts/force_display_mode.sh" ]]; then
+    # Hard fail-open: retries live inside the script; never block Chromium forever.
     env \
       DISPLAY_WIDTH="$DISPLAY_WIDTH" \
       DISPLAY_HEIGHT="$DISPLAY_HEIGHT" \
       DISPLAY_ROTATION="$DISPLAY_ROTATION" \
+      DISPLAY_FORCE_RETRIES="${DISPLAY_FORCE_RETRIES:-6}" \
       "$APP_ROOT/scripts/force_display_mode.sh" || true
   fi
 }

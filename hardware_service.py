@@ -1268,3 +1268,13 @@ def cmd_shaker_stop(mode: str = "C") -> Dict[str, Any]:
     stop_shaker_live_state()
     return last_result
 
+
+def ensure_shaker_stopped() -> Dict[str, Any]:
+    """Best-effort stop for both continuous (C) and intermittent (I) firmware modes."""
+    results = {
+        "C": cmd_shaker_stop("C"),
+        "I": cmd_shaker_stop("I"),
+    }
+    ok = bool(results["C"].get("ok") or results["I"].get("ok"))
+    return {"ok": ok, "results": results}
+

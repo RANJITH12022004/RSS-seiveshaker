@@ -802,9 +802,13 @@ body {
 
 /* Full-screen pages: fixed layout, parent does not scroll */
 .page-content:has(#page-home.active),
-.page-content:has(#page-test-run.active),
-.page-content:has(#page-validation-run.active) {
+.page-content:has(#page-test-run.active) {
     overflow: hidden;
+}
+
+.page-content:has(#page-validation-run.active) {
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .page {
@@ -2023,7 +2027,8 @@ body {
 /* ===== Validation Test Run — fits 528px content area (no top gap, button visible) ===== */
 .page-content:has(#page-validation-run.active) {
     padding: 0 20px 10px;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
 }
@@ -2036,7 +2041,8 @@ body {
     flex: 1 1 auto;
     min-height: 0;
     width: 100%;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     padding-top: 0;
 }
 
@@ -2050,8 +2056,8 @@ body {
     justify-content: flex-start;
     gap: 8px;
     flex: 0 0 auto;
-    max-height: 100%;
-    overflow: hidden;
+    max-height: none;
+    overflow: visible;
     box-sizing: border-box;
 }
 
@@ -3136,6 +3142,14 @@ body {
 .report-preview-container.report-a4-preview-mode #report-approve-panel {
     width: 100%;
     align-self: stretch;
+}
+
+#report-html-preview {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    background: #fff;
+    color: #000;
 }
 
 #page-report-preview .report-preview-actions {
@@ -9913,6 +9927,31 @@ body.keyboard-open {
    TEST RUN SCREEN — FIXED NO-SCROLL LAYOUT (1024x600)
    ============================================================ */
 
+/* .page:not(#page-home).active uses height:auto + overflow:visible (higher
+   specificity via :not(#id)). Force the test run page to stay viewport-locked. */
+.page-content:has(#page-test-run.active) {
+    overflow: hidden !important;
+    padding: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+}
+
+.page#page-test-run.active,
+#page-test-run.active {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    justify-content: flex-start !important;
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    padding: 0 !important;
+}
+
 #page-test-run {
     overflow: hidden !important;
     padding: 0 !important;
@@ -9921,10 +9960,13 @@ body.keyboard-open {
 .tr-fixed-layout {
     width: 100%;
     height: 100%;
+    max-height: 100%;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     background: var(--bg-primary, #0f172a);
+    min-height: 0;
+    flex: 1 1 auto;
 }
 
 /* ---- Run Screen 2-column layout ---- */
@@ -9932,9 +9974,9 @@ body.keyboard-open {
     flex: 1 1 auto;
     min-height: 0;
     display: grid;
-    grid-template-columns: 46% 54%;
+    grid-template-columns: 42% 58%;
     gap: 0;
-    padding: 10px 12px;
+    padding: 6px 10px;
     box-sizing: border-box;
     overflow: hidden;
 }
@@ -9943,25 +9985,26 @@ body.keyboard-open {
 .tr-panel-left {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding-right: 12px;
+    gap: 6px;
+    padding-right: 10px;
     border-right: 1px solid rgba(255,255,255,0.08);
     overflow: hidden;
+    min-height: 0;
 }
 
 /* Product + Batch header */
 .tr-product-block {
     background: linear-gradient(135deg, #1e3a5f 0%, #1e293b 100%);
-    border-radius: 12px;
-    padding: 14px 18px 12px;
+    border-radius: 10px;
+    padding: 10px 14px 8px;
     border: 1px solid rgba(59,130,246,0.25);
     flex-shrink: 0;
 }
 .tr-product-name {
-    font-size: 22px;
+    font-size: 18px;
     font-weight: 800;
     color: #f1f5f9;
-    line-height: 1.2;
+    line-height: 1.15;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -9970,17 +10013,17 @@ body.keyboard-open {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 6px;
+    margin-top: 4px;
 }
 .tr-batch-label {
-    font-size: 13px;
+    font-size: 11px;
     color: #64748b;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     font-weight: 600;
 }
 .tr-batch-val {
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 700;
     color: #93c5fd;
 }
@@ -9989,29 +10032,30 @@ body.keyboard-open {
 .tr-param-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    gap: 6px;
     flex: 1 1 auto;
     min-height: 0;
 }
 .tr-param-cell {
     background: var(--bg-card, #1e293b);
-    border-radius: 10px;
-    padding: 12px 14px;
+    border-radius: 8px;
+    padding: 8px 10px;
     border: 1px solid rgba(255,255,255,0.07);
     display: flex;
     flex-direction: column;
     justify-content: center;
-    gap: 4px;
+    gap: 2px;
+    min-height: 0;
 }
 .tr-param-label {
-    font-size: 12px;
+    font-size: 10px;
     color: #64748b;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     font-weight: 600;
 }
 .tr-param-val {
-    font-size: 22px;
+    font-size: 17px;
     font-weight: 800;
     color: #f1f5f9;
     line-height: 1.1;
@@ -10025,12 +10069,12 @@ body.keyboard-open {
     background: rgba(34,197,94,0.15);
     border: 1.5px solid #22c55e;
     color: #22c55e;
-    font-size: 17px;
+    font-size: 14px;
     font-weight: 800;
     letter-spacing: 0.12em;
     text-align: center;
     border-radius: 8px;
-    padding: 10px 0;
+    padding: 7px 0;
     flex-shrink: 0;
     transition: background 0.3s, color 0.3s, border-color 0.3s;
 }
@@ -10046,10 +10090,11 @@ body.keyboard-open {
 }
 
 .tr-footer-note {
-    font-size: 13px;
+    font-size: 11px;
     color: #475569;
     text-align: center;
     flex-shrink: 0;
+    line-height: 1.2;
 }
 
 /* ===== RIGHT PANEL ===== */
@@ -10057,9 +10102,10 @@ body.keyboard-open {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
-    padding-left: 12px;
+    gap: 6px;
+    padding-left: 10px;
     overflow: hidden;
+    min-height: 0;
 }
 
 .tr-svg-wrap {
@@ -10068,20 +10114,22 @@ body.keyboard-open {
     align-items: center;
     justify-content: center;
     min-height: 0;
+    max-height: 46%;
     width: 100%;
 }
 .tr-sieve-svg {
     width: auto;
     max-height: 100%;
     height: 100%;
+    max-width: 100%;
 }
 
 /* Timer block */
 .tr-timer-block {
     width: 100%;
     background: var(--bg-card, #1e293b);
-    border-radius: 12px;
-    padding: 12px 16px;
+    border-radius: 10px;
+    padding: 8px 12px;
     border: 1px solid rgba(255,255,255,0.08);
     flex-shrink: 0;
 }
@@ -10099,14 +10147,14 @@ body.keyboard-open {
     flex: 1;
 }
 .tr-timer-label {
-    font-size: 11px;
+    font-size: 10px;
     color: #64748b;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 600;
 }
 .tr-timer-val {
-    font-size: 36px;
+    font-size: 28px;
     font-weight: 800;
     color: #f1f5f9;
     letter-spacing: 0.04em;
@@ -10116,7 +10164,7 @@ body.keyboard-open {
 .tr-timer-elapsed { color: #34d399; }
 .tr-timer-divider {
     width: 2px;
-    height: 40px;
+    height: 32px;
     background: rgba(255,255,255,0.1);
     border-radius: 2px;
     flex-shrink: 0;
@@ -10124,9 +10172,10 @@ body.keyboard-open {
 .tr-progress-bg {
     background: rgba(255,255,255,0.08);
     border-radius: 6px;
-    height: 12px;
+    height: 10px;
     overflow: hidden;
     width: 100%;
+    margin-top: 6px !important;
 }
 .tr-progress-fill {
     height: 100%;
@@ -10135,25 +10184,25 @@ body.keyboard-open {
     transition: width 0.4s ease;
 }
 .tr-progress-text {
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 700;
     color: #94a3b8;
     text-align: center;
-    margin-top: 4px;
+    margin-top: 2px;
 }
 
 /* Control buttons */
 .tr-btn-row {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     width: 100%;
     flex-shrink: 0;
 }
 .tr-btn {
     flex: 1;
-    padding: 16px 0;
+    padding: 12px 0;
     border-radius: 10px;
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 800;
     border: none;
     cursor: pointer;
@@ -10453,7 +10502,7 @@ body.keyboard-open {
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.92);
-    z-index: 9000;
+    z-index: 100000;
     display: flex;
     align-items: stretch;
     justify-content: stretch;
@@ -10468,6 +10517,7 @@ body.keyboard-open {
     overflow: hidden;
     border-radius: 0;
     padding: 0;
+    min-height: 0;
 }
 .micron-picker-title {
     font-size: 22px;
@@ -10484,9 +10534,14 @@ body.keyboard-open {
     grid-template-columns: repeat(4, 1fr);
     gap: 10px;
     overflow-y: auto;
+    overflow-x: hidden;
     flex: 1;
+    min-height: 0;
     padding: 14px;
     align-content: start;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
 }
 .micron-btn {
     display: flex;

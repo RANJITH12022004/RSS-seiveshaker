@@ -125,61 +125,12 @@ def _run_continuous(program: Dict[str, Any]) -> None:
 
 
 def _run_intermittent(program: Dict[str, Any]) -> None:
-    amplitude = int(program["amplitude"])
-    duration = max(1, int(program.get("durationSeconds") or 1))
-    on_sec = max(1, int(program.get("intermittentOnSeconds") or 1))
-    off_sec = max(1, int(program.get("intermittentOffSeconds") or 1))
-    hw_mode = "I"
-    start = _now()
-    end_at = start + duration
-    segment_count = 0
-    while _now() < end_at:
-        if _stop_event.is_set() or _abort_event.is_set():
-            break
-        segment_count += 1
-        pulse_end = min(end_at, _now() + on_sec)
+    """Run for durationSeconds with firmware intermittent mode (command letter I).
 
-        def publish_run_progress(now: float) -> None:
-            _update_progress(
-                phase="run",
-                elapsed_sec=min(duration, max(0.0, now - start)),
-                target_duration_sec=duration,
-                segment_index=segment_count,
-                segment_count=segment_count,
-            )
-
-        _run_on(amplitude, hw_mode)
-        if _sleep_until(pulse_end, on_tick=publish_run_progress):
-            break
-        _ensure_off(hw_mode)
-        if _now() >= end_at:
-            break
-        wait_end = min(end_at, _now() + off_sec)
-
-        def publish_wait_progress(now: float) -> None:
-            _update_progress(
-                phase="wait",
-                elapsed_sec=min(duration, max(0.0, now - start)),
-                target_duration_sec=duration,
-                segment_index=segment_count,
-                segment_count=segment_count,
-                running=False,
-            )
-
-        if _sleep_until(wait_end, on_tick=publish_wait_progress):
-            break
-    _ensure_off(hw_mode)
-    elapsed = min(duration, max(0.0, _now() - start))
-    _update_progress(
-        phase="off",
-        elapsed_sec=elapsed,
-        target_duration_sec=duration,
-        segment_index=segment_count,
-        segment_count=segment_count,
-        running=False,
-        program_done=True,
-        completed_early=(_stop_event.is_set() or elapsed < duration) and not _abort_event.is_set(),
-    )
+    On/off pulse timing is owned by the ESP when mode is I — do not software-toggle
+    from UI on/off fields (those belong to Logical run/wait cycles only).
+    """
+    _run_continuous(program)
 
 
 def _run_logical(program: Dict[str, Any]) -> None:

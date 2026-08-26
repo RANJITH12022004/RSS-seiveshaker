@@ -312,6 +312,7 @@ ABORT_CAUSE_OPERATOR = "operator"
 ABORT_CAUSE_POWER = "power_interruption"
 _RECOVERABLE_CHECKPOINT_PHASES = frozenset({
     "running",
+    "weighing",
     "awaiting-dispense-or-weights",
     "awaiting-save",
     "awaiting-approval",
@@ -382,10 +383,11 @@ def _parse_report_wall_datetime(value) -> Optional[datetime]:
 
 
 def _read_duration_seconds_candidate(td: dict, report: dict) -> Optional[int]:
+    """Prefer actual elapsed run time over programmed set duration."""
     for src in (td, report):
         if not isinstance(src, dict):
             continue
-        for key in ("durationSeconds", "elapsedSeconds", "durationSec", "validationDurationSec"):
+        for key in ("actualElapsedSeconds", "elapsedSeconds", "durationSec", "validationDurationSec"):
             val = src.get(key)
             if val is None or val == "":
                 continue
@@ -393,6 +395,34 @@ def _read_duration_seconds_candidate(td: dict, report: dict) -> Optional[int]:
                 return max(0, int(val))
             except (TypeError, ValueError):
                 continue
+    return None
+
+
+def _read_set_duration_seconds(td: dict, report: dict) -> Optional[int]:
+    recipe = report.get("recipe") if isinstance((report or {}).get("recipe"), dict) else {}
+    for src in (td, recipe, report):
+        if not isinstance(src, dict):
+            continue
+        val = src.get("setDurationSeconds")
+        if val is None or val == "":
+            continue
+        try:
+            return max(0, int(val))
+        except (TypeError, ValueError):
+            continue
+    for src in (recipe, td, report):
+        if not isinstance(src, dict):
+            continue
+        # On td, durationSeconds is set-duration when actualElapsedSeconds is also present
+        if src is td and td.get("actualElapsedSeconds") is None and td.get("elapsedSeconds") is None:
+            continue
+        val = src.get("durationSeconds")
+        if val is None or val == "":
+            continue
+        try:
+            return max(0, int(val))
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -471,10 +501,32 @@ def _stamp_power_cut_run_duration(report: dict) -> dict:
     else:
         end_iso = end_raw if end_raw else (start_iso if start_iso else _utc_now_iso())
 
-    td["durationSeconds"] = duration
+    set_dur = _read_set_duration_seconds(td, report)
+    if set_dur is None and existing is not None and wall_secs is not None and existing == wall_secs:
+        # Ambiguous: keep whatever was stored as set if present on recipe
+        recipe = report.get("recipe") if isinstance(report.get("recipe"), dict) else {}
+        try:
+            set_dur = int(recipe.get("durationSeconds")) if recipe.get("durationSeconds") is not None else None
+        except (TypeError, ValueError):
+            set_dur = None
+
+    td["actualElapsedSeconds"] = duration
     td["elapsedSeconds"] = duration
     td["durationSec"] = duration
     td["validationDurationSec"] = duration
+    if set_dur is not None:
+        td["setDurationSeconds"] = set_dur
+        td["durationSeconds"] = set_dur  # programmed set duration
+    else:
+        # Preserve prior durationSeconds as set when actual is tracked separately
+        if td.get("setDurationSeconds") is None and td.get("durationSeconds") is not None:
+            try:
+                td["setDurationSeconds"] = max(0, int(td.get("durationSeconds")))
+            except (TypeError, ValueError):
+                pass
+        td["setDurationSeconds"] = td.get("setDurationSeconds")
+        if td.get("setDurationSeconds") is not None:
+            td["durationSeconds"] = td["setDurationSeconds"]
     td["testEndTime"] = end_iso
     if td.get("validationStartTime") or report.get("validationStartTime") or str(report.get("type") or "").strip().lower() == "validation":
         td["validationEndTime"] = end_iso
@@ -485,6 +537,9 @@ def _stamp_power_cut_run_duration(report: dict) -> dict:
     report["completedAt"] = end_iso
     report["durationSeconds"] = duration
     report["durationSec"] = duration
+    report["actualElapsedSeconds"] = duration
+    if td.get("setDurationSeconds") is not None:
+        report["setDurationSeconds"] = td["setDurationSeconds"]
 
     val_runs = td.get("validationRuns")
     if isinstance(val_runs, list):
@@ -526,73 +581,15 @@ def _stamp_power_cut_run_duration(report: dict) -> dict:
 
 
 def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
-    """Finalize a report after power loss: Completed, system-approved, Pass/Fail FAIL."""
+    """Finalize after power loss: Aborted, system auto-approved, remarks power interruption."""
     report = _stamp_power_cut_run_duration(report)
-    report = dict(report or {})
-    td = report.get("testData")
-    if not isinstance(td, dict):
-        td = {}
-    else:
-        td = dict(td)
-    td["abortCause"] = ABORT_CAUSE_POWER
-    td["approvalPassFail"] = "FAIL"
-    rtype = str(report.get("type") or "").strip().lower()
-    if rtype == "validation":
-        td["status"] = "Fail"
-    else:
-        td["status"] = "completed"
-    results = td.get("stepResults")
-    if isinstance(results, list):
-        drum_pf = {}
-        for idx, row in enumerate(results):
-            if not isinstance(row, dict):
-                continue
-            row = dict(row)
-            row["approvalPassFail"] = "FAIL"
-            if not row.get("resultText") or str(row.get("resultText")).strip() in ("", "__"):
-                row["resultText"] = "FAIL"
-            if not row.get("drumLabel"):
-                row["drumLabel"] = "Drum {}".format(idx + 1)
-            results[idx] = row
-            drum_pf["drum{}".format(idx + 1)] = "FAIL"
-        td["stepResults"] = results
-        if drum_pf:
-            td["drumPassFail"] = drum_pf
-    val_runs = td.get("validationRuns")
-    if isinstance(val_runs, list):
-        for idx, run in enumerate(val_runs):
-            if not isinstance(run, dict):
-                continue
-            run = dict(run)
-            run["status"] = "Fail"
-            val_runs[idx] = run
-        td["validationRuns"] = val_runs
-    td["remarks"] = POWER_INTERRUPTION_REMARKS
-    report["testData"] = td
-    report["status"] = "Completed"
-    report["remarks"] = POWER_INTERRUPTION_REMARKS
-    report["approvalRemarks"] = POWER_INTERRUPTION_REMARKS
-    report["abortCause"] = ABORT_CAUSE_POWER
-    report["reportApprovalStatus"] = "approved"
-    report["approvedBy"] = "System"
-    report["approvedByUsername"] = "system"
-    report["approvedAt"] = _utc_now_iso()
-    report["approvalPassFail"] = "FAIL"
-    if td.get("drumPassFail"):
-        report["drumPassFail"] = dict(td["drumPassFail"])
-    val_runs_top = report.get("validationRuns")
-    if isinstance(val_runs_top, list):
-        for idx, run in enumerate(val_runs_top):
-            if not isinstance(run, dict):
-                continue
-            run = dict(run)
-            run["status"] = "Fail"
-            val_runs_top[idx] = run
-        report["validationRuns"] = val_runs_top
-    # Keep completedAt from duration stamp (last checkpoint), never reboot wall clock.
-    if not report.get("completedAt"):
-        td_end = (report.get("testData") or {}).get("testEndTime") if isinstance(report.get("testData"), dict) else None
-        report["completedAt"] = td_end or _utc_now_iso()
+    report = _apply_unclean_shutdown_abort_fields(
+        report,
+        remarks=POWER_INTERRUPTION_REMARKS,
+        approved_by="System",
+        abort_cause=ABORT_CAUSE_POWER,
+    )
+    # Preserve stamped completedAt / start-end from duration stamp (not reboot clock).
     report.pop("_checkpointAt", None)
     report.pop("_checkpointSavedAt", None)
     report.pop("_checkpointPhase", None)
@@ -708,7 +705,7 @@ def _persist_unclean_shutdown_aborted_report(report: dict, *, force_power_interr
     """Save unclean-shutdown report and write print artifacts.
 
     Operator-aborted pending reports stay labeled Aborted.
-    Power interruption → Completed, system-approved, Pass/Fail FAIL.
+    Power interruption → Aborted, system auto-approved (remarks: power interruption).
     """
     if force_power_interruption or _report_abort_cause(report) != ABORT_CAUSE_OPERATOR:
         report = _apply_power_interruption_finalize_to_report(report)
@@ -749,15 +746,22 @@ def _audit_power_interruption_report(report: dict) -> None:
         or td.get("operatorName")
         or report.get("operatedByUsername")
         or td.get("operatedByUsername")
+        or td.get("testedBy")
         or "--"
     )
-    remarks = str(report.get("approvalRemarks") or report.get("remarks") or POWER_INTERRUPTION_REMARKS).strip()
-    detail = "{} | {} | operator {} | remarks: {} | status: Completed | approved by System".format(
-        ctx,
-        rtype,
-        operator,
-        remarks,
-    )
+    kind = "Validation" if rtype == "validation" else "Test"
+    try:
+        test_dur = int(td.get("actualElapsedSeconds") if td.get("actualElapsedSeconds") is not None else (td.get("elapsedSeconds") or 0))
+    except (TypeError, ValueError):
+        test_dur = 0
+    try:
+        set_dur = int(td.get("setDurationSeconds") if td.get("setDurationSeconds") is not None else (td.get("durationSeconds") or 0))
+    except (TypeError, ValueError):
+        set_dur = 0
+    detail = (
+        "{} aborted due to power interruption while {} was performing | {} | "
+        "report id {} | Test Duration {}s | Set Duration {}s | status: Aborted | approved by System"
+    ).format(kind, operator, ctx, rid, test_dur, set_dur)
     _audit(None, None, "Power interruption", detail)
 
 
@@ -1247,6 +1251,98 @@ def _member_profile_change_detail(before_member: dict, after_member: dict, usern
     if not changed:
         return ""
     return "Profile updated for {} | {}".format(username or "--", " | ".join(changed))
+
+
+def _fmt_recipe_amp_for_audit(raw) -> str:
+    if raw is None or raw == "":
+        return "--"
+    try:
+        v = float(raw)
+        if v >= 5:
+            return "{:.1f}".format(v / 10.0)
+        return "{:.1f}".format(v)
+    except (TypeError, ValueError):
+        return str(raw)
+
+
+def _recipe_param_summary(recipe: dict) -> str:
+    """Compact recipe parameter string for audit trails."""
+    r = recipe if isinstance(recipe, dict) else {}
+    mode = str(r.get("shakerMode") or "--").strip().upper() or "--"
+    amp = _fmt_recipe_amp_for_audit(r.get("amplitude"))
+    try:
+        dur = int(r.get("durationSeconds") or 0)
+        dur_s = "{:02d}:{:02d}".format(dur // 60, dur % 60) if dur else "--"
+    except (TypeError, ValueError):
+        dur_s = "--"
+    try:
+        n_sieves = int(r.get("numSieves") or 0)
+    except (TypeError, ValueError):
+        n_sieves = 0
+    sizes = r.get("sieveSizes") if isinstance(r.get("sieveSizes"), list) else []
+    size_s = ",".join(str(x) for x in sizes) if sizes else "--"
+    sa = r.get("sieveAnalysis")
+    if sa is None:
+        sa_s = "ON"
+    elif isinstance(sa, bool):
+        sa_s = "ON" if sa else "OFF"
+    else:
+        sa_s = "OFF" if str(sa).strip().lower() in ("0", "false", "off", "no") else "ON"
+    parts = [
+        "Mode={}".format(mode),
+        "Amplitude={}".format(amp),
+        "Duration={}".format(dur_s),
+        "Sieves={}".format(n_sieves or "--"),
+        "Sizes={}".format(size_s),
+        "SieveAnalysis={}".format(sa_s),
+    ]
+    if mode == "LOGICAL":
+        segs = r.get("logicalSegments") if isinstance(r.get("logicalSegments"), list) else []
+        parts.append("Segments={}".format(len(segs)))
+    return " | ".join(parts)
+
+
+def _recipe_created_audit_detail(recipe: dict, recipe_id=None) -> str:
+    r = recipe if isinstance(recipe, dict) else {}
+    label = r.get("name") or r.get("productName") or ""
+    head = "Recipe created: {}".format(label or ("id {}".format(recipe_id)))
+    if recipe_id:
+        head = "{} (id {})".format(head, recipe_id)
+    return "{} | {}".format(head, _recipe_param_summary(r))
+
+
+def _recipe_edited_audit_detail(before: dict, after: dict, recipe_id=None) -> str:
+    after = after if isinstance(after, dict) else {}
+    before = before if isinstance(before, dict) else {}
+    label = after.get("name") or after.get("productName") or ""
+    head = "Recipe id {}".format(recipe_id if recipe_id is not None else after.get("id") or "--")
+    if label:
+        head = "{}: {}".format(head, label)
+    keys = (
+        "shakerMode", "amplitude", "durationSeconds", "numSieves", "sieveSizes",
+        "sieveAnalysis", "intermittentOnSeconds", "intermittentOffSeconds",
+        "productName", "batchNumber", "logicalSegments",
+    )
+    changed = []
+    for key in keys:
+        b = before.get(key)
+        a = after.get(key)
+        if b != a:
+            if key == "amplitude":
+                changed.append("amplitude: {} -> {}".format(_fmt_recipe_amp_for_audit(b), _fmt_recipe_amp_for_audit(a)))
+            elif key == "sieveAnalysis":
+                def _sa(v):
+                    if v is None:
+                        return "ON"
+                    if isinstance(v, bool):
+                        return "ON" if v else "OFF"
+                    return "OFF" if str(v).strip().lower() in ("0", "false", "off", "no") else "ON"
+                changed.append("sieveAnalysis: {} -> {}".format(_sa(b), _sa(a)))
+            else:
+                changed.append("{}: {} -> {}".format(key, b if b not in (None, "") else "--", a if a not in (None, "") else "--"))
+    if changed:
+        return "{} | Changed: {}".format(head, " | ".join(changed))
+    return "{} | {}".format(head, _recipe_param_summary(after))
 
 
 def _rbac_member_from_session():
@@ -1783,10 +1879,7 @@ def create_recipe():
         if tok_err:
             return jsonify({"error": tok_err}), 401
         recipe_id = data_service.save_recipe(processed)
-        rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe created: {}".format(rlabel or ("id {}".format(recipe_id)))
-        if recipe_id:
-            rd = "{} (id {})".format(rd, recipe_id)
+        rd = _recipe_created_audit_detail(processed, recipe_id)
         _audit(None, None, "Recipe created", rd)
         if processed.get("recipeApprovalStatus") == "approved":
             if via_token:
@@ -1857,11 +1950,9 @@ def update_recipe(recipe_id):
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             return jsonify({"error": tok_err}), 401
+        before_recipe = data_service.get_recipe(recipe_id) or {}
         data_service.save_recipe(processed)
-        rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe id {}".format(recipe_id)
-        if rlabel:
-            rd = "{}: {}".format(rd, rlabel)
+        rd = _recipe_edited_audit_detail(before_recipe, processed, recipe_id)
         _audit(None, None, "Recipe edited", rd)
         if processed.get("recipeApprovalStatus") == "approved":
             if via_token:
@@ -2929,6 +3020,7 @@ def login():
                     target_user=username,
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
+                _ensure_shaker_stopped_safe()
                 return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
             # Do not attribute failed factory attempts to the suppressed Factory actor.
             _audit_event(
@@ -3030,6 +3122,7 @@ def login():
                 after={"username": user.get("username"), "role": user.get("role")},
             )
             safe_user = data_service.sanitize_member_for_client(data_service.get_current_user() or user) or user
+            _ensure_shaker_stopped_safe()
             return jsonify({"success": True, "user": safe_user}), 200
 
         # Wrong password: increment failedAttempts (may lock at 3)
@@ -3059,8 +3152,35 @@ def login():
                 },
                 extra={"failedAttempt": fa, "maximumAttempts": 3},
             )
-            # If this attempt caused the account to become locked, show lockout immediately
+            # If this attempt caused the account to become locked, audit lock + show lockout
             if status == "locked":
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details="{} tried to log in. Account is locked.".format(attempted_username),
+                    target_user=attempted_username,
+                    actor_override={
+                        "user": attempted_username,
+                        "role": attempted_role,
+                        "name": updated.get("name") or attempted_username,
+                    },
+                )
+                _audit_event(
+                    action="User locked",
+                    outcome="denied",
+                    entity_type="member",
+                    entity_name=attempted_username,
+                    details="Account locked for {} after failed password attempts (3/3)".format(attempted_username),
+                    target_user=attempted_username,
+                    actor_override={
+                        "user": attempted_username,
+                        "role": attempted_role,
+                        "name": updated.get("name") or attempted_username,
+                    },
+                    extra={"failedAttempt": fa, "maximumAttempts": 3, "status": "locked"},
+                )
                 return jsonify({
                     "error": "Account locked. Contact admin.",
                     "remainingAttempts": 0
@@ -3252,6 +3372,7 @@ def login_biometric():
             after={"username": user.get("username"), "role": user.get("role")},
             extra={"templateId": template_id, "confidence": identified.get("confidence")},
         )
+        _ensure_shaker_stopped_safe()
         return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user, "templateId": template_id, "confidence": identified.get("confidence")}), 200
     except Exception as e:
         app.logger.exception("Error during biometric login")
@@ -3336,6 +3457,7 @@ def logout():
         user = data_service.get_current_user()
         if user:
             _audit_session_logout(user, reason, request_source="POST /api/data/auth/logout")
+        _ensure_shaker_stopped_safe()
         data_service.touch_app_clean_stop_flag()
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
@@ -3628,18 +3750,20 @@ def update_own_profile():
                 target_user=uname,
                 signature=sig,
             )
-        _audit_event(
-            action="Profile updated",
-            outcome="success",
-            entity_type="member",
-            entity_id=member_id,
-            entity_name=uname,
-            details="Profile updated (self)",
-            target_user=uname,
-            before=data_service.sanitize_member_for_client(before_member),
-            after=data_service.sanitize_member_for_client(updated) or updated,
-            signature=sig,
-        )
+        profile_detail = _member_profile_change_detail(before_member, updated, uname)
+        if profile_detail:
+            _audit_event(
+                action="Profile updated",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details=profile_detail,
+                target_user=uname,
+                before=data_service.sanitize_member_for_client(before_member),
+                after=data_service.sanitize_member_for_client(updated) or updated,
+                signature=sig,
+            )
         safe = data_service.sanitize_member_for_client(updated) or dict(updated)
         return jsonify({"ok": True, "member": safe}), 200
     except ValueError as e:
@@ -4761,7 +4885,7 @@ def export_reports():
                 if st == "pending":
                     missing.append(rid)
                     continue
-            if _generate_report_pdf_file(rid, timestamp_kind="exported"):
+            if _generate_report_pdf_file(rid, timestamp_kind=None):
                 generated.append(rid)
             else:
                 missing.append(rid)
@@ -4965,7 +5089,7 @@ def export_reports_stream():
                              "percent": int(this_progress_at + per_report_pct * 0.3), "id": rid,
                              "status": "generating",
                              "message": "Generating PDF for report {} of {}...".format(i, total)})
-                if not _generate_report_pdf_file(rid, timestamp_kind="exported"):
+                if not _generate_report_pdf_file(rid, timestamp_kind=None):
                     result["failed"].append({"id": rid, "reason": "render"})
                     yield _emit({"event": "report", "current": i, "total": total,
                                  "percent": int(next_progress_at), "id": rid,
@@ -5340,6 +5464,25 @@ def shaker_stop():
     data = request.get_json(force=True, silent=True) or {}
     mode = str(data.get("mode") or "C").strip()
     return jsonify(hardware_service.cmd_shaker_stop(mode))
+
+
+@app.route("/api/hardware/shaker/ensure-stopped", methods=["POST"])
+def shaker_ensure_stopped():
+    """Send #00C and #00I so any background shaker run is stopped (login/logout safety)."""
+    # Allow during login/logout even without test permissions — auth optional for safety stop.
+    try:
+        result = hardware_service.ensure_shaker_stopped()
+        return jsonify(result), 200
+    except Exception as e:
+        app.logger.exception("ensure_shaker_stopped failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _ensure_shaker_stopped_safe():
+    try:
+        hardware_service.ensure_shaker_stopped()
+    except Exception:
+        app.logger.exception("Background shaker ensure-stopped failed")
 
 
 @app.route("/api/hardware/shaker/live", methods=["GET"])

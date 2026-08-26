@@ -159,7 +159,10 @@
             currentInput.value = val.substring(0, val.length - 1);
             updatePopup();
         } else if (key === 'enter') {
-            // Enter - close keyboard
+            // Enter - fire change so onchange handlers (e.g. num-sieves) run, then close
+            try {
+                currentInput.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (e) {}
             closeOSK();
         } else if (key === 'space') {
             // Space
