@@ -200,6 +200,6 @@ def prepare_desktop_created_member(member_id: int, initial_password: str):
     patch["mustChangePassword"] = False
     patch["failedAttempts"] = 0
     patch["status"] = "active"
-    data_service._clear_creation_password_commitment(patch)
+    # Keep creationPasswordHash so initial admin-assigned password cannot be reused.
     data_service._save_member_record(patch)
     return patch

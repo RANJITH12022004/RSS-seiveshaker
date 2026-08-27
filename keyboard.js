@@ -187,7 +187,15 @@
                 var allowDecimal = _inputWantsDecimalKeyboard(currentInput);
                 if (key === '.' || key === ',') {
                     if (!allowDecimal || currentInput.value.indexOf('.') >= 0) return;
-                    key = '.';
+                    if (!currentInput.value) {
+                        currentInput.value = '0.';
+                    } else {
+                        currentInput.value += '.';
+                    }
+                    updatePopup();
+                    var decimalEvent = new Event('input', { bubbles: true });
+                    currentInput.dispatchEvent(decimalEvent);
+                    return;
                 } else if (!/^\d$/.test(key)) {
                     return;
                 }

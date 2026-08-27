@@ -708,6 +708,7 @@ def _append_sieve_analysis_text_lines(
     sep: str,
     include_graph_marker: bool = False,
     graph_marker: str = "",
+    include_chart: bool = True,
 ) -> None:
     """Append before/after and fraction/% sieve tables (4 dp weights)."""
     if width >= 48:
@@ -769,7 +770,7 @@ def _append_sieve_analysis_text_lines(
         except Exception:
             pass
         lines.append(graph_marker)
-    elif width < 48:
+    elif width < 48 and include_chart:
         # Thermal: horizontal ## ## chart (no raster marker)
         try:
             import print_service as _ps
@@ -780,7 +781,7 @@ def _append_sieve_analysis_text_lines(
                     lines.append(cl)
         except Exception:
             pass
-    else:
+    elif width >= 48 and include_chart:
         # A4: wide vertical ## chart
         lines.append(sep)
         try:
@@ -953,6 +954,7 @@ def build_sieve_shaker_shared_lines(
     width: int = 56,
     include_graph_marker: bool = False,
     graph_marker: str = "",
+    include_chart: bool = True,
 ) -> list:
     """Shared field set for A4 preview and thermal — same data, width-aware wrapping later."""
     r = dict(report or {})
@@ -967,7 +969,14 @@ def build_sieve_shaker_shared_lines(
     batch = recipe.get("batchNumber") or td.get("batchNumber") or "n/a"
     amplitude = _fmt_amp_display(recipe.get("amplitude") or td.get("amplitude"))
     shaker_mode = recipe.get("shakerMode") or td.get("shakerMode") or "n/a"
-    weigh_method = td.get("weighMethod") or recipe.get("weighMethod") or "n/a"
+    weigh_method_raw = td.get("weighMethod") or recipe.get("weighMethod") or "n/a"
+    weigh_method = str(weigh_method_raw).strip().lower()
+    if weigh_method in ("manual", "m"):
+        weigh_method = "Manual"
+    elif weigh_method in ("automatic", "auto", "a"):
+        weigh_method = "Automatic"
+    else:
+        weigh_method = str(weigh_method_raw).strip().title() if str(weigh_method_raw).strip() else "n/a"
     tested_by = td.get("testedBy") or r.get("operatedByUsername") or "n/a"
     operator_id = (
         r.get("employeeId")
@@ -1107,6 +1116,7 @@ def build_sieve_shaker_shared_lines(
             sep=sep,
             include_graph_marker=include_graph_marker,
             graph_marker=graph_marker,
+            include_chart=include_chart,
         )
     elif include_graph_marker and graph_marker:
         lines.append(graph_marker)

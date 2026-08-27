@@ -177,6 +177,25 @@
     function getInitialWeight() { return _sr.sampleWeight || 0; }
     function getWeighMethod() { return (_sr.recipe && _sr.recipe.weighMethod) || 'automatic'; }
 
+    function getReportWeighMethod() {
+        if (_sr.manualWeighUsed) return 'manual';
+        return getWeighMethod();
+    }
+
+    function _srCaptureRunElapsed() {
+        var local = _sr.pollStartTime ? Math.floor((Date.now() - _sr.pollStartTime) / 1000) : 0;
+        var backend = Math.floor(_sr.elapsedSeconds || 0);
+        return Math.max(local, backend, 0);
+    }
+
+    function _wzParseManualWeight(raw) {
+        var s = String(raw || '').trim();
+        if (!s || !/^\d+(\.\d{1,4})?$/.test(s)) return null;
+        var v = parseFloat(s);
+        if (isNaN(v) || v <= 0) return null;
+        return Math.round(v * 10000) / 10000;
+    }
+
     // Full ASTM sieve table from ASTM/USP standard (mesh number + microns + mm)
     var ASTM_SIEVES = [
         { mesh: 'No. 3½', micron: 5600, mm: '5.600' },
@@ -553,10 +572,12 @@
         abortedRun: false,
         completedEarly: false,
         weighingActive: false,
+        manualWeighUsed: false,
         testStartIso: null,
         livePollInterval: null,
         targetSeconds: 0,
         elapsedSeconds: 0,
+        runEndElapsedSeconds: 0,
         pollStartTime: 0
     };
 
@@ -603,8 +624,8 @@
                 intermittentOnSeconds: recipe.intermittentOnSeconds,
                 intermittentOffSeconds: recipe.intermittentOffSeconds,
                 logicalSegments: recipe.logicalSegments,
-                actualElapsedSeconds: Math.floor(_sr.elapsedSeconds || 0),
-                elapsedSeconds: Math.floor(_sr.elapsedSeconds || 0),
+                actualElapsedSeconds: Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0),
+                elapsedSeconds: Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0),
                 completedEarly: _sr.completedEarly,
                 status: aborted ? 'Aborted' : 'Completed',
                 testStatus: 'Pending',
@@ -622,7 +643,7 @@
                 panWeight: analysisOn ? panFraction : 0,
                 initialWeight: sampleWeight,
                 finalWeight: finalWeight,
-                weighMethod: getWeighMethod(),
+                weighMethod: getReportWeighMethod(),
                 testedBy: typeof getCurrentUser === 'function' ? getCurrentUser() : '',
                 testStartTime: _sr.testStartIso || null,
                 testEndTime: (aborted || _sr.done) ? (typeof formatLocalWallClockIso === 'function' ? formatLocalWallClockIso() : new Date().toISOString()) : null
@@ -643,8 +664,8 @@
                 payload.testData.status = _sr.running ? 'running' : (payload.testData.status || 'running');
                 payload.testData.durationSeconds = _sr.targetSeconds;
                 payload.testData.setDurationSeconds = _sr.targetSeconds;
-                payload.testData.actualElapsedSeconds = Math.floor(_sr.elapsedSeconds || 0);
-                payload.testData.elapsedSeconds = Math.floor(_sr.elapsedSeconds || 0);
+                payload.testData.actualElapsedSeconds = Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0);
+                payload.testData.elapsedSeconds = Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0);
                 payload.testData.testStartTime = _sr.testStartIso || payload.testData.testStartTime || nowIso;
                 payload.testData.testEndTime = nowIso;
             }
@@ -699,9 +720,11 @@
         _sr.abortedRun = false;
         _sr.completedEarly = false;
         _sr.weighingActive = false;
+        _sr.manualWeighUsed = false;
         _sr.testStartIso = null;
         _sr.targetSeconds = _srTargetSeconds(_sr.recipe);
         _sr.elapsedSeconds = 0;
+        _sr.runEndElapsedSeconds = 0;
         if (_sr.livePollInterval) { clearInterval(_sr.livePollInterval); _sr.livePollInterval = null; }
 
         if (_srEl('tr-product-name')) _srEl('tr-product-name').textContent = recipe.productName || recipe.name || '--';
@@ -827,6 +850,8 @@
         return apiRequest(API_BASE + '/api/hardware/shaker/live', { method: 'GET' }).then(function (data) {
             _srRefreshFromLive(data);
             if (data && data.programDone && _sr.running) {
+                _sr.runEndElapsedSeconds = _srCaptureRunElapsed();
+                _sr.elapsedSeconds = _sr.runEndElapsedSeconds;
                 _srFinishRun(false);
             }
             return data;
@@ -887,6 +912,10 @@
     }
 
     function _srFinishRun(aborted) {
+        if (!_sr.runEndElapsedSeconds) {
+            _sr.runEndElapsedSeconds = _srCaptureRunElapsed();
+        }
+        _sr.elapsedSeconds = _sr.runEndElapsedSeconds;
         _sr.running = false;
         _sr.done = true;
         _sr.abortedRun = !!aborted;
@@ -953,7 +982,7 @@
             '<div class="wz-instruction">' + instruction + '</div>' +
             '<div class="wz-weight-display" id="' + idWeight + '">' + (isManual ? 'Manual Entry' : 'Waiting\u2026') + '</div>' +
             '<div class="wz-manual-row" id="' + idRow + '" style="display:' + (isManual ? 'flex' : 'none') + ';">' +
-            '<input type="number" id="' + idInput + '" class="wz-manual-input decimal-input" step="0.001" inputmode="decimal" placeholder="Type weight (g) e.g. 45.987">' +
+            '<input type="text" id="' + idInput + '" class="wz-manual-input decimal-input" inputmode="decimal" data-decimal-input="true" autocomplete="off" placeholder="Type weight (g) e.g. 23.1234">' +
             '<button class="wz-btn wz-btn-next" id="' + idConfirm + '" style="padding:10px 20px;">OK</button></div>' +
             '<div class="wz-buttons">' +
             (stepIdx > 0 ? '<button class="wz-btn wz-btn-back" id="' + idBack + '">Back</button>' : '') +
@@ -1004,6 +1033,7 @@
 
         function renderCurrent() {
             var isManual = getWeighMethod() === 'manual';
+            if (isManual) _sr.manualWeighUsed = true;
             var instr = isManual ? 'Type the weight manually below' : (steps[currentStep].instruction);
             _wzRenderStep(cid, currentStep, steps.length, steps[currentStep].label, instr, { isManual: isManual });
             var nextBtn = el('wz-next-btn');
@@ -1031,6 +1061,7 @@
         function showManualInput() {
             stopScalePoll('wz');
             _wzOnWeight = null;
+            _sr.manualWeighUsed = true;
             var typeBtn = el('wz-type-btn');
             if (typeBtn) typeBtn.style.display = 'none';
             var row = el('wz-manual-row');
@@ -1041,6 +1072,7 @@
             if (inp) {
                 inp.classList.add('decimal-input');
                 inp.setAttribute('inputmode', 'decimal');
+                inp.setAttribute('data-decimal-input', 'true');
                 if (typeof attachInputFocusHandlers === 'function') attachInputFocusHandlers(row);
                 setTimeout(function () {
                     inp.focus();
@@ -1053,10 +1085,10 @@
             }
             var confirmBtn = el('wz-manual-confirm');
             if (confirmBtn) confirmBtn.onclick = function () {
-                var v = inp ? parseFloat(inp.value) : 0;
-                if (!v || v <= 0) return;
+                var v = inp ? _wzParseManualWeight(inp.value) : null;
+                if (v == null) return;
                 weights[currentStep] = v;
-                if (display) { display.textContent = v.toFixed(3) + ' g'; display.classList.add('captured'); }
+                if (display) { display.textContent = v.toFixed(4) + ' g'; display.classList.add('captured'); }
                 var nb = el('wz-next-btn');
                 if (nb) nb.disabled = false;
                 if (row) row.style.display = 'none';
@@ -1160,6 +1192,7 @@
         function showManualInput() {
             stopScalePoll('wz');
             _wzOnWeight = null;
+            _sr.manualWeighUsed = true;
             var typeBtn = el('wz-type-btn');
             if (typeBtn) typeBtn.style.display = 'none';
             var row = el('wz-manual-row');
@@ -1170,6 +1203,7 @@
             if (inp) {
                 inp.classList.add('decimal-input');
                 inp.setAttribute('inputmode', 'decimal');
+                inp.setAttribute('data-decimal-input', 'true');
                 if (typeof attachInputFocusHandlers === 'function') attachInputFocusHandlers(row);
                 setTimeout(function () {
                     inp.focus();
@@ -1180,10 +1214,10 @@
             }
             var confirmBtn = el('wz-manual-confirm');
             if (confirmBtn) confirmBtn.onclick = function () {
-                var v = inp ? parseFloat(inp.value) : 0;
-                if (!v || v <= 0) return;
+                var v = inp ? _wzParseManualWeight(inp.value) : null;
+                if (v == null) return;
                 afterWeights[currentStep] = v;
-                if (display) { display.textContent = v.toFixed(3) + ' g'; display.classList.add('captured'); }
+                if (display) { display.textContent = v.toFixed(4) + ' g'; display.classList.add('captured'); }
                 var nb = el('wz-next-btn');
                 if (nb) nb.disabled = false;
                 if (row) row.style.display = 'none';
@@ -1515,9 +1549,14 @@
         pollInterval: null,
         startTime: 0,
         startIso: null,
+        runEndElapsedSeconds: 0,
         aborted: false,
         awaitingActualAmplitude: false
     };
+
+    function _valCaptureElapsed() {
+        return _valState.startTime ? Math.floor((Date.now() - _valState.startTime) / 1000) : 0;
+    }
 
     function _valNowIso() {
         return typeof formatLocalWallClockIso === 'function' ? formatLocalWallClockIso() : new Date().toISOString();
@@ -1538,7 +1577,7 @@
 
     function _valWriteCheckpoint(phase) {
         try {
-            var elapsed = _valState.startTime ? Math.floor((Date.now() - _valState.startTime) / 1000) : 0;
+            var elapsed = _valState.runEndElapsedSeconds || _valCaptureElapsed();
             var nowIso = _valNowIso();
             var payload = {
                 type: 'validation',
@@ -1685,9 +1724,14 @@
     function _stopShakerValidation(aborted) {
         var mode = _valIsIntermittent(_valState.type) ? 'I' : 'C';
         apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
+        _valState.runEndElapsedSeconds = _valCaptureElapsed();
         _valState.running = false;
         _valState.aborted = !!aborted;
         _stopValPoll();
+        var timerEl = document.getElementById('val-drum-timer');
+        if (timerEl && typeof formatSecondsToMmSs === 'function') {
+            timerEl.textContent = formatSecondsToMmSs(_valState.runEndElapsedSeconds);
+        }
         var el = document.getElementById('val-run-status'); if (el) { el.textContent = aborted ? 'Aborted' : 'Completed'; el.style.color = aborted ? '#ef4444' : '#27ae60'; }
         el = document.getElementById('val-run-status-sub'); if (el) el.textContent = aborted ? 'Test aborted.' : 'Enter the measured amplitude below';
         var btn = document.getElementById('btn-validation-start-abort');
@@ -1728,6 +1772,7 @@
             if (el && typeof formatSecondsToMmSs === 'function') el.textContent = formatSecondsToMmSs(elapsed);
             _valWriteCheckpoint('running');
             if (elapsed >= (_valState.durationSec || 0)) {
+                _valState.runEndElapsedSeconds = elapsed;
                 _stopShakerValidation(false);
             }
         }, 1000);
@@ -1741,7 +1786,7 @@
         _valState.awaitingActualAmplitude = false;
         var confirmEl = document.getElementById('val-confirm-section');
         if (confirmEl) confirmEl.style.display = 'none';
-        var elapsed = _valState.startTime ? Math.floor((Date.now() - _valState.startTime) / 1000) : 0;
+        var elapsed = _valState.runEndElapsedSeconds || _valCaptureElapsed();
         var endIso = _valNowIso();
         var startIso = _valState.startIso || endIso;
         var setDurLabel = typeof formatSecondsToMmSs === 'function' ? formatSecondsToMmSs(_valState.durationSec) : String(_valState.durationSec);

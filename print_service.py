@@ -1494,7 +1494,7 @@ def _build_bar_chart_escpos(fracs: list, labels: list, sample_weight: float, wid
 
 
 def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -> str:
-    """Thermal text matching sample layout (32-col); horizontal ## chart, no raster marker."""
+    """Thermal text matching sample layout (32-col); no sieve chart on thermal."""
     try:
         from report_service import build_sieve_shaker_shared_lines
     except ImportError:
@@ -1506,6 +1506,7 @@ def _format_sieve_shaker_thermal(report_data: Dict[str, Any], width: int = 32) -
             width=width,
             include_graph_marker=False,
             graph_marker="",
+            include_chart=False,
         )
     else:
         lines = ["SIEVE SHAKER", "Report unavailable"]

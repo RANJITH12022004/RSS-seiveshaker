@@ -106,6 +106,8 @@ def password_reuses_recent(member: Dict[str, Any], new_password: str) -> bool:
     current = str(member.get("password") or "")
     if current and current == new_pwd:
         return True
+    if new_password_matches_creation_commitment(member, new_pwd):
+        return True
     _normalize_password_history(member)
     for entry in member.get("passwordHistory") or []:
         salt = str(entry.get("salt") or "")
