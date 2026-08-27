@@ -2392,6 +2392,12 @@ function normalizeTestCommaCredential(s) {
     return t;
 }
 
+function _clearLoginSessionBeforeAuth() {
+    window.currentUser = null;
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    try { localStorage.removeItem('currentUser'); } catch (e) {}
+}
+
 function login() {
     var uidEl = document.getElementById('login-uid');
     var pwdEl = document.getElementById('login-pwd');
@@ -2401,6 +2407,7 @@ function login() {
         showAppModal('Please enter User/Employee ID and Password.', 'Login');
         return;
     }
+    _clearLoginSessionBeforeAuth();
     // Use raw fetch here so we can show backend error messages (lockout, disabled, etc.)
     fetch((API_BASE || '') + '/api/data/auth/login', {
         method: 'POST',
@@ -2432,7 +2439,7 @@ function login() {
         var msg = data.error || '';
         var remaining = (typeof data.remainingAttempts === 'number') ? data.remainingAttempts : null;
         if (result.status === 403 && data && data.passwordChangeRequired) {
-            showMandatoryPasswordResetScreen(data.username || username, password);
+            showMandatoryPasswordResetScreen(data.username || username, password, true);
             return;
         }
         if (result.status === 403 && data && data.passwordExpired) {
@@ -2494,7 +2501,7 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
     }, 60);
 }
 
-function showMandatoryPasswordResetScreen(username, oldPassword) {
+function showMandatoryPasswordResetScreen(username, oldPassword, passwordWasAccepted) {
     window._passwordResetScreenMode = 'mandatory';
     window._mandatoryPasswordResetPending = true;
     _setPasswordResetCancelVisible(false);
@@ -2502,7 +2509,7 @@ function showMandatoryPasswordResetScreen(username, oldPassword) {
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Reset your password';
     if (subEl) {
-        subEl.textContent = 'Your password must be reset before you can continue. Choose a new password to finish signing in. New password cannot match your last 5 passwords.';
+        subEl.textContent = 'Your current password was accepted. Choose a new personal password to finish signing in. The new password cannot match your temporary password or any of your last 5 passwords.';
     }
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
@@ -2530,6 +2537,12 @@ function showMandatoryPasswordResetScreen(username, oldPassword) {
         if (confEl) { confEl.value = ''; }
         if (newEl && typeof newEl.focus === 'function') newEl.focus();
         else if (oldEl && typeof oldEl.focus === 'function') oldEl.focus();
+        if (passwordWasAccepted) {
+            showAppModal(
+                'Your current password is correct. You must set a new personal password on this screen before you can use the app.',
+                'Password Reset Required'
+            );
+        }
     }, 60);
 }
 
@@ -2654,10 +2667,10 @@ function submitMandatoryPasswordReset() {
     var oldEl = document.getElementById('expired-reset-old-password');
     var newEl = document.getElementById('expired-reset-new-password');
     var confEl = document.getElementById('expired-reset-confirm-password');
-    var username = userEl ? String(userEl.value || '').trim() : '';
-    var oldPassword = oldEl ? String(oldEl.value || '') : '';
-    var newPassword = newEl ? String(newEl.value || '') : '';
-    var confirmPassword = confEl ? String(confEl.value || '') : '';
+    var username = userEl ? normalizeTestCommaCredential(userEl.value || '') : '';
+    var oldPassword = oldEl ? normalizeTestCommaCredential(oldEl.value || '') : '';
+    var newPassword = newEl ? normalizeTestCommaCredential(newEl.value || '') : '';
+    var confirmPassword = confEl ? normalizeTestCommaCredential(confEl.value || '') : '';
 
     if (!username || !oldPassword || !newPassword || !confirmPassword) {
         showAppModal('Please fill all fields.', 'Reset Password');
@@ -2668,7 +2681,7 @@ function submitMandatoryPasswordReset() {
         return;
     }
     if (oldPassword === newPassword) {
-        showAppModal('New password must be different from your current password.', 'Reset Password');
+        showAppModal('New password must be different from your current temporary password.', 'Reset Password');
         return;
     }
     var passwordError = getStrongPasswordError(newPassword);

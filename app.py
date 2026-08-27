@@ -3087,8 +3087,9 @@ def login():
                     )
                     return jsonify(
                         {
-                            "error": "Password change required before login.",
+                            "error": "Your current password is correct. Set a new personal password before you can sign in.",
                             "passwordChangeRequired": True,
+                            "passwordAccepted": True,
                             "username": username,
                         }
                     ), 403
