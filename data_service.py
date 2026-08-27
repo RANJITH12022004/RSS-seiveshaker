@@ -30,6 +30,10 @@ FACTORY_USER = {
     "role": "Factory",
 }
 
+PASSWORD_HISTORY_LIMIT = 5
+PASSWORD_HISTORY_REUSE_ERROR = "New password must not match any of your last 5 passwords."
+
+
 def _creation_password_pepper() -> str:
     return os.environ.get("KIOSK_PASSWORD_PEPPER", "tapdensity-kiosk-default-pepper-v1")
 
@@ -61,6 +65,87 @@ def new_password_matches_creation_commitment(member: Dict[str, Any], new_passwor
     return hmac.compare_digest(hash_creation_password(salt, new_password), expected)
 
 
+def _normalize_password_history(member: Dict[str, Any]) -> None:
+    """Ensure passwordHistory is a clean list of salted hash entries, capped at PASSWORD_HISTORY_LIMIT."""
+    raw = member.get("passwordHistory")
+    if not isinstance(raw, list):
+        member["passwordHistory"] = []
+        return
+    cleaned: List[Dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        salt = str(entry.get("salt") or "")
+        hash_val = str(entry.get("hash") or "")
+        if not salt or not hash_val:
+            continue
+        cleaned.append({
+            "salt": salt,
+            "hash": hash_val,
+            "changedAt": str(entry.get("changedAt") or ""),
+        })
+        if len(cleaned) >= PASSWORD_HISTORY_LIMIT:
+            break
+    member["passwordHistory"] = cleaned
+
+
+def _make_history_entry(password: str) -> Dict[str, Any]:
+    salt = secrets.token_hex(16)
+    return {
+        "salt": salt,
+        "hash": hash_creation_password(salt, str(password or "")),
+        "changedAt": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def password_reuses_recent(member: Dict[str, Any], new_password: str) -> bool:
+    """True if new_password matches the current password or any of the last 5 history hashes."""
+    new_pwd = str(new_password or "")
+    if not new_pwd:
+        return False
+    current = str(member.get("password") or "")
+    if current and current == new_pwd:
+        return True
+    _normalize_password_history(member)
+    for entry in member.get("passwordHistory") or []:
+        salt = str(entry.get("salt") or "")
+        expected = str(entry.get("hash") or "")
+        if not salt or not expected:
+            continue
+        if hmac.compare_digest(hash_creation_password(salt, new_pwd), expected):
+            return True
+    return False
+
+
+def _push_password_into_history(member: Dict[str, Any], old_password: str) -> None:
+    """Prepend hashed old password to history and trim to PASSWORD_HISTORY_LIMIT."""
+    old_pwd = str(old_password or "")
+    _normalize_password_history(member)
+    if not old_pwd:
+        return
+    history = list(member.get("passwordHistory") or [])
+    history.insert(0, _make_history_entry(old_pwd))
+    member["passwordHistory"] = history[:PASSWORD_HISTORY_LIMIT]
+
+
+def apply_password_change_to_member(
+    member: Dict[str, Any],
+    new_password: str,
+    changed_at: Optional[str] = None,
+) -> None:
+    """
+    Reject reuse of recent passwords, push the old password into history, and set the new password.
+    Mutates member in place. Raises ValueError(PASSWORD_HISTORY_REUSE_ERROR) on reuse.
+    """
+    new_pwd = str(new_password or "")
+    if password_reuses_recent(member, new_pwd):
+        raise ValueError(PASSWORD_HISTORY_REUSE_ERROR)
+    old_pwd = str(member.get("password") or "")
+    _push_password_into_history(member, old_pwd)
+    member["password"] = new_pwd
+    member["passwordLastChangedAt"] = str(changed_at or (datetime.utcnow().isoformat() + "Z"))
+
+
 def sanitize_member_for_client(member: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Return a shallow copy safe for JSON responses (no password or creation commitment fields)."""
     if not member:
@@ -69,6 +154,7 @@ def sanitize_member_for_client(member: Optional[Dict[str, Any]]) -> Optional[Dic
     safe.pop("password", None)
     safe.pop("creationPasswordSalt", None)
     safe.pop("creationPasswordHash", None)
+    safe.pop("passwordHistory", None)
     return safe
 
 
@@ -81,8 +167,7 @@ def complete_mandatory_password_reset(username: str, new_password: str) -> Dict[
         raise ValueError("The factory user cannot be modified.")
     if not bool(m.get("mustChangePassword")):
         raise ValueError("Password change is not required for this account")
-    m["password"] = str(new_password or "")
-    m["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
+    apply_password_change_to_member(m, new_password)
     _clear_creation_password_commitment(m)
     _save_member_record(m)
     return m
@@ -676,6 +761,7 @@ def _normalize_member_password_fields(member: Dict[str, Any]) -> None:
     if bool(member.get("mustChangePassword")) and pwd0:
         if not member.get("creationPasswordSalt") or not member.get("creationPasswordHash"):
             _set_creation_password_commitment(member, pwd0)
+    _normalize_password_history(member)
 
 
 def _parse_isoish_datetime(value: Any) -> Optional[datetime]:
@@ -855,6 +941,8 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
             member_data["featureOverrides"] = existing.get("featureOverrides", {"allow": [], "deny": []})
         if "password" not in member_data:
             member_data["password"] = existing.get("password", "")
+        # Always take history from the stored member; never trust client-supplied history.
+        member_data["passwordHistory"] = list(existing.get("passwordHistory") or [])
         old_pwd = str(existing.get("password", ""))
         new_pwd = str(member_data.get("password", ""))
         try:
@@ -863,6 +951,14 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
             actor_int = None
         mid = int(member_id)
         if new_pwd != old_pwd and new_pwd:
+            scratch = {
+                "password": old_pwd,
+                "passwordHistory": list(existing.get("passwordHistory") or []),
+            }
+            apply_password_change_to_member(scratch, new_pwd)
+            member_data["password"] = scratch["password"]
+            member_data["passwordHistory"] = scratch["passwordHistory"]
+            member_data["passwordLastChangedAt"] = scratch["passwordLastChangedAt"]
             if actor_int is not None and actor_int == mid:
                 member_data["mustChangePassword"] = False
                 _clear_creation_password_commitment(member_data)
@@ -870,14 +966,15 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
                 member_data["mustChangePassword"] = True
                 _set_creation_password_commitment(member_data, new_pwd)
         else:
-            for k in ("mustChangePassword", "creationPasswordSalt", "creationPasswordHash"):
+            for k in ("mustChangePassword", "creationPasswordSalt", "creationPasswordHash", "passwordHistory"):
                 if k not in member_data and k in existing:
                     member_data[k] = existing[k]
-        if "passwordLastChangedAt" not in member_data:
-            if new_pwd != old_pwd:
-                member_data["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
-            else:
-                member_data["passwordLastChangedAt"] = existing.get("passwordLastChangedAt") or existing.get("createdAt") or datetime.utcnow().isoformat() + "Z"
+            if "passwordLastChangedAt" not in member_data:
+                member_data["passwordLastChangedAt"] = (
+                    existing.get("passwordLastChangedAt")
+                    or existing.get("createdAt")
+                    or datetime.utcnow().isoformat() + "Z"
+                )
         if "createdAt" not in member_data:
             member_data["createdAt"] = existing.get("createdAt") or datetime.utcnow().isoformat() + "Z"
         _normalize_member_biometric_fields(member_data)
@@ -913,6 +1010,7 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
         member_data["createdAt"] = datetime.utcnow().isoformat() + "Z"
     if "passwordLastChangedAt" not in member_data:
         member_data["passwordLastChangedAt"] = member_data.get("createdAt")
+    member_data["passwordHistory"] = []
     member_data["mustChangePassword"] = True
     _set_creation_password_commitment(member_data, str(member_data.get("password") or ""))
     _normalize_member_biometric_fields(member_data)
@@ -970,6 +1068,7 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
             user.pop("password", None)
             user.pop("creationPasswordSalt", None)
             user.pop("creationPasswordHash", None)
+            user.pop("passwordHistory", None)
             return user
     return None
 
@@ -1066,14 +1165,13 @@ def _save_member_record(updated: Dict[str, Any]) -> None:
 
 
 def set_member_password(member_id: int, new_password: str, changed_at: Optional[str] = None) -> Dict[str, Any]:
-    """Set password for member and stamp passwordLastChangedAt."""
+    """Set password for member and stamp passwordLastChangedAt (enforces last-5 history)."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("Factory user password cannot be changed from this flow.")
-    m["password"] = str(new_password or "")
-    m["passwordLastChangedAt"] = str(changed_at or (datetime.utcnow().isoformat() + "Z"))
+    apply_password_change_to_member(m, new_password, changed_at=changed_at)
     _save_member_record(m)
     return m
 

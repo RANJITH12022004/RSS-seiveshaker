@@ -94,7 +94,8 @@ def _sanitize_audit_payload(value):
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
-            if str(k).lower() in ("password",):
+            key_l = str(k).lower()
+            if key_l in ("password", "creationpasswordsalt", "creationpasswordhash", "passwordhistory"):
                 out[k] = "***"
             else:
                 out[k] = _sanitize_audit_payload(v)

@@ -2463,7 +2463,9 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
     var titleEl = document.getElementById('password-reset-page-title');
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Reset Expired Password';
-    if (subEl) subEl.textContent = 'Your password has expired. Set a new password to continue.';
+    if (subEl) {
+        subEl.textContent = 'Your password has expired. Set a new password to continue. New password cannot match your last 5 passwords.';
+    }
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
     var sidebar = document.querySelector('.app-container .sidebar');
@@ -2500,7 +2502,7 @@ function showMandatoryPasswordResetScreen(username, oldPassword) {
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Reset your password';
     if (subEl) {
-        subEl.textContent = 'Your password must be reset before you can continue. Choose a new password to finish signing in.';
+        subEl.textContent = 'Your password must be reset before you can continue. Choose a new password to finish signing in. New password cannot match your last 5 passwords.';
     }
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
@@ -2556,7 +2558,9 @@ function openProfilePasswordResetPage() {
     var titleEl = document.getElementById('password-reset-page-title');
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Change Password';
-    if (subEl) subEl.textContent = 'Enter your current password and choose a new one.';
+    if (subEl) {
+        subEl.textContent = 'Enter your current password and choose a new one. New password cannot match your last 5 passwords.';
+    }
     goToPage('password-expired-reset');
     setTimeout(function () {
         var userEl = document.getElementById('expired-reset-username');

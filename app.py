@@ -229,7 +229,8 @@ def _sanitize_audit_payload(value):
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
-            if str(k).lower() in ("password",):
+            key_l = str(k).lower()
+            if key_l in ("password", "creationpasswordsalt", "creationpasswordhash", "passwordhistory"):
                 out[k] = "***"
             else:
                 out[k] = _sanitize_audit_payload(v)
@@ -3288,6 +3289,7 @@ def mandatory_password_reset():
         user.pop("password", None)
         user.pop("creationPasswordSalt", None)
         user.pop("creationPasswordHash", None)
+        user.pop("passwordHistory", None)
         data_service.save_current_user(user)
         data_service.write_session_power_audit_pending(user)
         safe_user = data_service.sanitize_member_for_client(user) or user
@@ -3359,6 +3361,7 @@ def login_biometric():
         user.pop("password", None)
         user.pop("creationPasswordSalt", None)
         user.pop("creationPasswordHash", None)
+        user.pop("passwordHistory", None)
         data_service.record_successful_login(username)
         data_service.save_current_user(user)
         data_service.write_session_power_audit_pending(user)
