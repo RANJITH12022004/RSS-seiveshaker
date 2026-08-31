@@ -283,6 +283,7 @@
 
     function _inputWantsDecimalKeyboard(inputElement) {
         if (!inputElement) return false;
+        if (inputElement.getAttribute('data-amplitude-input') === 'true') return true;
         if (inputElement.getAttribute('data-decimal-input') === 'true') return true;
         if (String(inputElement.getAttribute('inputmode') || '').toLowerCase() === 'decimal') return true;
         return inputElement.classList.contains('decimal-input');

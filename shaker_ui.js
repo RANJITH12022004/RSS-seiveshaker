@@ -405,7 +405,9 @@
     function buildShakerRecipeFromQuickForm() {
         var productName = (document.getElementById('quick-product-name') || {}).value || '';
         var batchNumber = (document.getElementById('quick-batch-number') || {}).value || '';
-        var amplitudeRaw = parseFloat((document.getElementById('quick-amplitude') || {}).value);
+        var amplitudeRaw = typeof normalizeAmplitudeValue === 'function'
+            ? normalizeAmplitudeValue((document.getElementById('quick-amplitude') || {}).value)
+            : parseFloat((document.getElementById('quick-amplitude') || {}).value);
         var mode = getQuickShakerMode();
         productName = productName.trim();
         batchNumber = batchNumber.trim();
@@ -480,7 +482,9 @@
 
     window.saveRecipeFromParams = function () {
         var productName = ((document.getElementById('recipe-product-name') || {}).value || '').trim();
-        var amplitudeRaw = parseFloat((document.getElementById('recipe-amplitude') || {}).value);
+        var amplitudeRaw = typeof normalizeAmplitudeValue === 'function'
+            ? normalizeAmplitudeValue((document.getElementById('recipe-amplitude') || {}).value)
+            : parseFloat((document.getElementById('recipe-amplitude') || {}).value);
         var mode = getRecipeShakerMode();
         if (!productName) {
             showAppModal('Please enter recipe name.', 'Create Recipe');
@@ -1430,7 +1434,11 @@
             var modeRadio = document.querySelector('input[name="recipe-shaker-mode"][value="' + mode + '"]');
             if (modeRadio) modeRadio.checked = true;
             var ampEl = document.getElementById('recipe-amplitude');
-            if (ampEl && r.amplitude != null) ampEl.value = String((r.amplitude / 10).toFixed(1)); // convert backend (5-30) → display (0.5-3.0)
+            if (ampEl && r.amplitude != null) {
+                ampEl.value = typeof formatAmplitudeInputValue === 'function'
+                    ? formatAmplitudeInputValue(r.amplitude)
+                    : String((r.amplitude / 10).toFixed(1));
+            }
             if (mode === 'LOGICAL') {
                 window._recipeLogicalSegments = (r.logicalSegments || []).map(function (s) {
                     return {
@@ -1571,6 +1579,10 @@
         return _valIsIntermittent(type) ? 'Intermittent' : 'Continuous';
     }
 
+    function _valHwMode(type) {
+        return _valIsIntermittent(type) ? 'I' : 'C';
+    }
+
     function _valNormalizeType(type) {
         return _valIsIntermittent(type) ? 'INTERMITTENT' : 'CONTINUOUS';
     }
@@ -1632,7 +1644,9 @@
         var typeEl = document.querySelector('input[name="validation-type-select"]:checked');
         _valState.type = typeEl ? typeEl.value : 'CONTINUOUS';
         var ampEl = document.getElementById('val-set-amplitude');
-        var ampRaw = parseFloat((ampEl || {}).value);
+        var ampRaw = typeof normalizeAmplitudeValue === 'function'
+            ? normalizeAmplitudeValue((ampEl || {}).value)
+            : parseFloat((ampEl || {}).value);
         if (isNaN(ampRaw) || ampRaw < 0.5 || ampRaw > 3.0) {
             showAppModal('Please enter amplitude between 0.5 and 3.0.', 'Validation');
             return;
@@ -1647,6 +1661,7 @@
         }
         _valState.amplitude = Math.round(ampRaw * 10);
         _valState.amplitudeDisplay = ampRaw;
+        if (ampEl) ampEl.value = ampRaw.toFixed(1);
         _valState.durationSec = durSec;
         _valState.running = false;
         _valState.aborted = false;
@@ -1688,6 +1703,7 @@
         }
         var program = {
             shakerMode: _valNormalizeType(_valState.type),
+            mode: _valHwMode(_valState.type),
             amplitude: _valState.amplitude,
             durationSeconds: _valState.durationSec
         };
@@ -1722,7 +1738,7 @@
     };
 
     function _stopShakerValidation(aborted) {
-        var mode = _valIsIntermittent(_valState.type) ? 'I' : 'C';
+        var mode = _valHwMode(_valState.type);
         apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
         _valState.runEndElapsedSeconds = _valCaptureElapsed();
         _valState.running = false;
@@ -1748,9 +1764,10 @@
             if (el) el.style.display = 'grid';
             var ampInp = document.getElementById('val-actual-amplitude');
             if (ampInp) {
-                ampInp.classList.add('decimal-input');
+                ampInp.setAttribute('data-amplitude-input', 'true');
+                ampInp.removeAttribute('data-decimal-input');
                 ampInp.setAttribute('inputmode', 'decimal');
-                ampInp.setAttribute('data-decimal-input', 'true');
+                if (typeof bindAmplitudeInputs === 'function') bindAmplitudeInputs(document);
                 setTimeout(function () {
                     try { ampInp.focus(); } catch (e1) {}
                     if (typeof openOSKForInput === 'function') {
@@ -1853,7 +1870,9 @@
 
     window.submitValidationResult = function () {
         var raw = ((document.getElementById('val-actual-amplitude') || {}).value || '').trim();
-        var actualAmp = raw === '' ? null : parseFloat(raw);
+        var actualAmp = raw === '' ? null : (typeof normalizeAmplitudeValue === 'function'
+            ? normalizeAmplitudeValue(raw)
+            : parseFloat(raw));
         if (actualAmp == null || isNaN(actualAmp) || actualAmp < 0.5 || actualAmp > 3.0) {
             showAppModal('Please enter actual amplitude between 0.5 and 3.0.', 'Validation');
             return;
@@ -1867,7 +1886,7 @@
         _valState.running = false;
         _valState.awaitingActualAmplitude = false;
         _stopValPoll();
-        var mode = _valIsIntermittent(_valState.type) ? 'I' : 'C';
+        var mode = _valHwMode(_valState.type);
         return apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } })
             .catch(function () { return null; })
             .then(function () {

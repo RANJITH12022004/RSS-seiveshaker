@@ -1114,7 +1114,7 @@ def reset_uart_log(reason: str = "manual"):
 
 def _normalize_hw_mode(mode: str) -> str:
     m = str(mode or "C").strip().upper()
-    return "I" if m in ("I", "INTERMITTENT") else "C"
+    return "I" if m in ("I", "INTERMITTENT", "INTERMEDIATE") else "C"
 
 
 def _format_shaker_frame(amplitude: int, mode: str) -> str:

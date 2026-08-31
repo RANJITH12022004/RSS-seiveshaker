@@ -4486,8 +4486,46 @@ function formatAmplitudeDisplay(raw) {
     if (raw == null || raw === '') return '--';
     var v = parseFloat(raw);
     if (isNaN(v)) return String(raw);
-    if (v >= 5) return (v / 10).toFixed(1);
-    return v.toFixed(1);
+    if (v >= 5) v = v / 10;
+    return (Math.round(Math.max(0.5, Math.min(3.0, v)) * 10) / 10).toFixed(1);
+}
+
+/** Parse and clamp amplitude to 0.5–3.0 mm with one decimal place. */
+function normalizeAmplitudeValue(raw) {
+    var n = parseFloat(raw);
+    if (isNaN(n)) return null;
+    if (n >= 5) n = n / 10;
+    return Math.round(Math.max(0.5, Math.min(3.0, n)) * 10) / 10;
+}
+
+function formatAmplitudeInputValue(raw) {
+    var n = normalizeAmplitudeValue(raw);
+    return n == null ? '' : n.toFixed(1);
+}
+
+function bindAmplitudeInputs(root) {
+    var scope = root || document;
+    scope.querySelectorAll('input[data-amplitude-input="true"]').forEach(function (input) {
+        if (!input || input._amplitudeInputBound) return;
+        input._amplitudeInputBound = true;
+        input.addEventListener('input', function () {
+            var v = String(input.value || '');
+            if (!v) return;
+            v = v.replace(/[^\d.]/g, '');
+            var dot = v.indexOf('.');
+            if (dot !== -1) {
+                v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, '');
+                if (v.length - dot - 1 > 1) v = v.slice(0, dot + 2);
+            }
+            if (input.value !== v) input.value = v;
+        });
+        input.addEventListener('blur', function () {
+            var v = String(input.value || '').trim();
+            if (!v) return;
+            var n = normalizeAmplitudeValue(v);
+            if (n != null) input.value = n.toFixed(1);
+        });
+    });
 }
 
 function isSieveShakerRecipe(recipe) {
@@ -10405,6 +10443,7 @@ function showValidationAdapterCheckModal() {
 function bindTestRunDecimalInputs() {
     document.querySelectorAll('input[data-decimal-input="true"], input.decimal-input').forEach(function (input) {
         if (!input || input._decimalInputBound) return;
+        if (input.getAttribute('data-amplitude-input') === 'true') return;
         input._decimalInputBound = true;
         input.addEventListener('blur', function () {
             var v = String(input.value || '').trim();
@@ -10418,6 +10457,7 @@ function bindTestRunDecimalInputs() {
 function initKioskShellAfterLoad() {
     try {
         bindTestRunDecimalInputs();
+        bindAmplitudeInputs();
         if (typeof closeOSK === 'function') closeOSK();
         _attachAllKeyboardHandlers(document);
         if (typeof ensureMainContentTouchScroll === 'function') ensureMainContentTouchScroll();
@@ -10438,6 +10478,7 @@ function initKioskShellAfterLoad() {
             if (originalGoToPage) originalGoToPage(pageName);
             setTimeout(function () {
                 _attachAllKeyboardHandlers(document);
+                if (typeof bindAmplitudeInputs === 'function') bindAmplitudeInputs(document);
             }, 200);
         };
     }

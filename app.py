@@ -5452,7 +5452,8 @@ def shaker_start():
         return gate
     data = request.get_json(force=True, silent=True) or {}
     amplitude = data.get("amplitude", 15)
-    mode = str(data.get("mode") or "C").strip()
+    mode = data.get("mode") or data.get("shakerMode") or "C"
+    mode = str(mode).strip()
     result = hardware_service.cmd_shaker_start(amplitude, mode)
     return jsonify(result), (200 if result.get("ok") else 400)
 
@@ -5466,7 +5467,8 @@ def shaker_stop():
     if gate:
         return gate
     data = request.get_json(force=True, silent=True) or {}
-    mode = str(data.get("mode") or "C").strip()
+    mode = data.get("mode") or data.get("shakerMode") or "C"
+    mode = str(mode).strip()
     return jsonify(hardware_service.cmd_shaker_stop(mode))
 
 
