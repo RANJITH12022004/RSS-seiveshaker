@@ -38,6 +38,10 @@ _uart_owner_lock_path = "/tmp/shaker_uart_owner.lock"
 _uart_owner_lock_fd = None
 _hardware_init_done = False
 _hardware_owner_active = False
+_shaker_tx_lock = threading.Lock()
+_shaker_epoch = 0
+_ensure_stop_lock = threading.Lock()
+_SHAKER_OK_RE = re.compile(r"(^|[^a-z])ok([^a-z]|$)")
 DEFAULT_UART_LOG = "/opt/kiosk/uart_communications.log"
 SHAKER_AMPLITUDE_MIN = 5
 SHAKER_AMPLITUDE_MAX = 30
@@ -60,10 +64,34 @@ _live_state = {
 
 
 def normalize_line(line: str) -> str:
-    s = str(line or "").strip()
+    s = str(line or "").replace("\x00", "").strip()
     if s.endswith("*"):
         s = s[:-1].strip()
     return s
+
+
+def _line_is_shaker_ok(line: str) -> bool:
+    """True when a controller line is the stop acknowledgement.
+
+    Debug firmware glues OK onto the previous token, so a bare equality check
+    misses it and the kiosk retransmits stop frames.
+    """
+    norm = normalize_line(line).lower()
+    if not norm:
+        return False
+    return bool(_SHAKER_OK_RE.search(norm))
+
+
+def _shaker_epoch_value() -> int:
+    with _shaker_tx_lock:
+        return _shaker_epoch
+
+
+def _bump_shaker_epoch() -> int:
+    global _shaker_epoch
+    with _shaker_tx_lock:
+        _shaker_epoch += 1
+        return _shaker_epoch
 
 
 _VAL_PROGRESS_RE = re.compile(r"^(\d+),(--|\d+(?:\.\d+)?)$")
@@ -1160,18 +1188,33 @@ def stop_shaker_live_state() -> None:
         _live_state["updatedAt"] = time.time()
 
 
+def _superseded(frame: str = "") -> Dict[str, Any]:
+    out: Dict[str, Any] = {"ok": False, "superseded": True, "error": "superseded"}
+    if frame:
+        out["cmd"] = frame
+    return out
+
+
 def send_shaker_frame(
     amplitude: int,
     mode: str = "C",
     *,
     wait_ok: bool = False,
     timeout: float = 2.0,
+    epoch: Optional[int] = None,
+    max_retries: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Send raw 4-char shaker frame (#NNC / #NNI) + newline. Optionally wait for OK on stop."""
-    frame = _format_shaker_frame(amplitude, mode)
-    _append_uart_log("TX", frame)
+    """Send one 4-char shaker frame (#NNC / #NNI) plus newline.
 
-    if not serial:
+    A newer start bumps the epoch. A stop that loses that race must not write,
+    or it cuts the run that just began. Stop is a single frame: the controller
+    drops the load before it prints OK, and retrying the frame is what floods
+    the line with stop commands and debug text.
+    """
+    frame = _format_shaker_frame(amplitude, mode)
+    retries = MAX_RETRIES if max_retries is None else max(1, int(max_retries))
+
+    def _placeholder(open_error: str = "") -> Dict[str, Any]:
         if wait_ok or amplitude == 0:
             return {
                 "ok": True,
@@ -1181,61 +1224,78 @@ def send_shaker_frame(
                 "cmd": frame,
                 "placeholder": True,
             }
+        if open_error:
+            return {"ok": False, "error": open_error, "cmd": frame}
         return {"ok": True, "cmd": frame, "placeholder": True}
 
-    for attempt in range(MAX_RETRIES):
+    if not serial:
+        _append_uart_log("TX", frame)
+        return _placeholder()
+
+    last_error = "send failed"
+    for attempt in range(retries):
+        if epoch is not None and _shaker_epoch_value() != epoch:
+            return _superseded(frame)
         if not esp_ser or not getattr(esp_ser, "is_open", False):
             try:
                 _open_esp_serial()
             except Exception as e:
-                if attempt == MAX_RETRIES - 1:
-                    if wait_ok or amplitude == 0:
-                        return {
-                            "ok": True,
-                            "response": "OK",
-                            "normalized": "ok",
-                            "kind": "ok",
-                            "cmd": frame,
-                            "placeholder": True,
-                        }
-                    return {"ok": False, "error": str(e), "cmd": frame}
+                last_error = str(e)
+                if attempt == retries - 1:
+                    return _placeholder(last_error)
                 time.sleep(0.2)
                 continue
         try:
             with ser_lock:
-                if esp_ser and esp_ser.is_open:
-                    esp_ser.write((frame + "\n").encode("ascii", errors="replace"))
-                    esp_ser.flush()
+                if epoch is not None and _shaker_epoch_value() != epoch:
+                    return _superseded(frame)
+                if not esp_ser or not esp_ser.is_open:
+                    raise RuntimeError("serial port closed")
+                esp_ser.write((frame + "\n").encode("ascii", errors="replace"))
+                esp_ser.flush()
+            _append_uart_log("TX", frame)
             if not wait_ok:
                 return {"ok": True, "cmd": frame, "kind": "sent"}
-            deadline = time.time() + max(0.5, float(timeout or 2.0))
+            deadline = time.time() + max(0.4, float(timeout or 2.0))
             while time.time() < deadline:
+                if epoch is not None and _shaker_epoch_value() != epoch:
+                    return _superseded(frame)
                 try:
                     line = line_q.get(timeout=0.1)
-                    if line and line.strip():
-                        raw = line.strip()
-                        _append_uart_log("RX", raw)
-                        norm = normalize_line(raw).lower()
-                        if norm == "ok":
-                            payload = build_line_payload(raw)
-                            update_shaker_live_state(lastLine=raw)
-                            return {
-                                "ok": True,
-                                "response": raw,
-                                "normalized": norm,
-                                "kind": "ok",
-                                "cmd": frame,
-                                **payload,
-                            }
                 except queue.Empty:
-                    pass
-            if attempt == MAX_RETRIES - 1:
-                return {"ok": False, "error": "Timeout waiting for OK", "cmd": frame}
+                    continue
+                if not line or not str(line).strip():
+                    continue
+                raw = str(line).strip()
+                _append_uart_log("RX", raw)
+                if _line_is_shaker_ok(raw):
+                    payload = build_line_payload(raw)
+                    update_shaker_live_state(lastLine=raw)
+                    return {
+                        "ok": True,
+                        "response": raw,
+                        "normalized": "ok",
+                        "kind": "ok",
+                        "cmd": frame,
+                        **payload,
+                    }
+            if amplitude == 0:
+                return {"ok": True, "cmd": frame, "kind": "sent", "acknowledged": False}
+            last_error = "Timeout waiting for OK"
+            if attempt == retries - 1:
+                return {"ok": False, "error": last_error, "cmd": frame}
         except Exception as e:
-            if attempt == MAX_RETRIES - 1:
-                return {"ok": False, "error": str(e), "cmd": frame}
+            last_error = str(e)
+            if attempt == retries - 1:
+                return {"ok": False, "error": last_error, "cmd": frame}
+            try:
+                with ser_lock:
+                    if esp_ser:
+                        esp_ser.close()
+            except Exception:
+                pass
             time.sleep(0.2)
-    return {"ok": False, "error": "send failed", "cmd": frame}
+    return {"ok": False, "error": last_error, "cmd": frame}
 
 
 def cmd_shaker_start(amplitude: int, mode: str = "C") -> Dict[str, Any]:
@@ -1248,33 +1308,57 @@ def cmd_shaker_start(amplitude: int, mode: str = "C") -> Dict[str, Any]:
             "ok": False,
             "error": f"amplitude must be between {SHAKER_AMPLITUDE_MIN} and {SHAKER_AMPLITUDE_MAX}",
         }
-    hw_mode = _normalize_hw_mode(mode)
-    result = send_shaker_frame(amp, hw_mode, wait_ok=False)
+    # Mode I on this controller sets status=1 and ss_logic() ramps the triac
+    # delay to off on every loop, so the shaker chatters and does not stay at
+    # the set amplitude. Mode C writes the dimming table once and holds.
+    # Validation already uses C. Tests that asked for I are sent as C.
+    hw_mode = "C"
+    epoch = _bump_shaker_epoch()
+    result = send_shaker_frame(amp, hw_mode, wait_ok=False, epoch=epoch, max_retries=1)
     if result.get("ok"):
-        update_shaker_live_state(running=True, amplitude=amp, mode=hw_mode, phase="run")
+        update_shaker_live_state(
+            running=True,
+            amplitude=amp,
+            mode=hw_mode,
+            phase="run",
+            requestedMode=_normalize_hw_mode(mode),
+        )
     return result
 
 
-def cmd_shaker_stop(mode: str = "C") -> Dict[str, Any]:
+def cmd_shaker_stop(mode: str = "C", epoch: Optional[int] = None) -> Dict[str, Any]:
     hw_mode = _normalize_hw_mode(mode)
-    last_result: Dict[str, Any] = {"ok": False, "error": "stop not acknowledged"}
-    for attempt in range(10):
-        result = send_shaker_frame(0, hw_mode, wait_ok=True, timeout=1.5)
-        last_result = result
-        if result.get("ok"):
-            stop_shaker_live_state()
-            return result
-        time.sleep(0.2)
+    if epoch is None:
+        epoch = _shaker_epoch_value()
+    elif _shaker_epoch_value() != epoch:
+        return _superseded()
+    result = send_shaker_frame(
+        0,
+        hw_mode,
+        wait_ok=True,
+        timeout=0.8,
+        epoch=epoch,
+        max_retries=1,
+    )
+    if result.get("superseded") or _shaker_epoch_value() != epoch:
+        return _superseded(str(result.get("cmd") or ""))
     stop_shaker_live_state()
-    return last_result
+    return result
 
 
 def ensure_shaker_stopped() -> Dict[str, Any]:
-    """Best-effort stop for both continuous (C) and intermittent (I) firmware modes."""
-    results = {
-        "C": cmd_shaker_stop("C"),
-        "I": cmd_shaker_stop("I"),
-    }
-    ok = bool(results["C"].get("ok") or results["I"].get("ok"))
-    return {"ok": ok, "results": results}
+    """One stop frame per firmware mode. A start that begins during this returns immediately."""
+    if not _ensure_stop_lock.acquire(blocking=False):
+        return {"ok": True, "skipped": True}
+    try:
+        epoch = _shaker_epoch_value()
+        results: Dict[str, Any] = {}
+        for mode in ("C", "I"):
+            results[mode] = cmd_shaker_stop(mode, epoch=epoch)
+            if results[mode].get("superseded"):
+                return {"ok": False, "superseded": True, "results": results}
+        ok = any(bool(item.get("ok")) for item in results.values())
+        return {"ok": ok, "results": results}
+    finally:
+        _ensure_stop_lock.release()
 

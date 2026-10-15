@@ -5485,10 +5485,15 @@ def shaker_ensure_stopped():
 
 
 def _ensure_shaker_stopped_safe():
-    try:
-        hardware_service.ensure_shaker_stopped()
-    except Exception:
-        app.logger.exception("Background shaker ensure-stopped failed")
+    """Stop the shaker without blocking the HTTP worker on serial OK waits."""
+
+    def _run():
+        try:
+            hardware_service.ensure_shaker_stopped()
+        except Exception:
+            app.logger.exception("Background shaker ensure-stopped failed")
+
+    threading.Thread(target=_run, name="shaker-ensure-stopped", daemon=True).start()
 
 
 @app.route("/api/hardware/shaker/live", methods=["GET"])
