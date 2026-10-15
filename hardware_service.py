@@ -45,6 +45,10 @@ _SHAKER_OK_RE = re.compile(r"(^|[^a-z])ok([^a-z]|$)")
 DEFAULT_UART_LOG = "/opt/kiosk/uart_communications.log"
 SHAKER_AMPLITUDE_MIN = 5
 SHAKER_AMPLITUDE_MAX = 30
+# Firmware replies OK only on a zero frame. Keep sending that frame until OK,
+# unless a newer start has taken the line.
+SHAKER_STOP_ATTEMPTS = 15
+SHAKER_STOP_ACK_TIMEOUT = 1.5
 _live_state = {
     "running": False,
     "amplitude": None,
@@ -144,7 +148,7 @@ def classify_line(line: str) -> str:
     s = normalize_line(line).lower()
     if not s:
         return "empty"
-    if s == "ok":
+    if s == "ok" or _line_is_shaker_ok(line):
         return "ok"
     if s in ("completed", "complete", "complete.", "done"):
         return "completed"
@@ -1207,9 +1211,8 @@ def send_shaker_frame(
     """Send one 4-char shaker frame (#NNC / #NNI) plus newline.
 
     A newer start bumps the epoch. A stop that loses that race must not write,
-    or it cuts the run that just began. Stop is a single frame: the controller
-    drops the load before it prints OK, and retrying the frame is what floods
-    the line with stop commands and debug text.
+    or it cuts the run that just began. A stop frame is not success until the
+    controller line is OK; the caller sends it again until that happens.
     """
     frame = _format_shaker_frame(amplitude, mode)
     retries = MAX_RETRIES if max_retries is None else max(1, int(max_retries))
@@ -1274,13 +1277,11 @@ def send_shaker_frame(
                     return {
                         "ok": True,
                         "response": raw,
-                        "normalized": "ok",
-                        "kind": "ok",
                         "cmd": frame,
                         **payload,
+                        "normalized": "ok",
+                        "kind": "ok",
                     }
-            if amplitude == 0:
-                return {"ok": True, "cmd": frame, "kind": "sent", "acknowledged": False}
             last_error = "Timeout waiting for OK"
             if attempt == retries - 1:
                 return {"ok": False, "error": last_error, "cmd": frame}
@@ -1308,11 +1309,7 @@ def cmd_shaker_start(amplitude: int, mode: str = "C") -> Dict[str, Any]:
             "ok": False,
             "error": f"amplitude must be between {SHAKER_AMPLITUDE_MIN} and {SHAKER_AMPLITUDE_MAX}",
         }
-    # Mode I on this controller sets status=1 and ss_logic() ramps the triac
-    # delay to off on every loop, so the shaker chatters and does not stay at
-    # the set amplitude. Mode C writes the dimming table once and holds.
-    # Validation already uses C. Tests that asked for I are sent as C.
-    hw_mode = "C"
+    hw_mode = _normalize_hw_mode(mode)
     epoch = _bump_shaker_epoch()
     result = send_shaker_frame(amp, hw_mode, wait_ok=False, epoch=epoch, max_retries=1)
     if result.get("ok"):
@@ -1321,33 +1318,53 @@ def cmd_shaker_start(amplitude: int, mode: str = "C") -> Dict[str, Any]:
             amplitude=amp,
             mode=hw_mode,
             phase="run",
-            requestedMode=_normalize_hw_mode(mode),
         )
     return result
 
 
+def _stop_acknowledged(result: Dict[str, Any]) -> bool:
+    return bool(result.get("ok") and result.get("kind") == "ok")
+
+
 def cmd_shaker_stop(mode: str = "C", epoch: Optional[int] = None) -> Dict[str, Any]:
+    """Send #00C or #00I until the firmware replies OK.
+
+    A start that begins during the retries cancels the remaining frames so the
+    new run is not cut off.
+    """
     hw_mode = _normalize_hw_mode(mode)
     if epoch is None:
         epoch = _shaker_epoch_value()
     elif _shaker_epoch_value() != epoch:
         return _superseded()
-    result = send_shaker_frame(
-        0,
-        hw_mode,
-        wait_ok=True,
-        timeout=0.8,
-        epoch=epoch,
-        max_retries=1,
-    )
-    if result.get("superseded") or _shaker_epoch_value() != epoch:
-        return _superseded(str(result.get("cmd") or ""))
-    stop_shaker_live_state()
-    return result
+    last_result: Dict[str, Any] = {
+        "ok": False,
+        "error": "stop not acknowledged",
+        "cmd": _format_shaker_frame(0, hw_mode),
+    }
+    for _attempt in range(SHAKER_STOP_ATTEMPTS):
+        if _shaker_epoch_value() != epoch:
+            return _superseded(last_result.get("cmd") or "")
+        result = send_shaker_frame(
+            0,
+            hw_mode,
+            wait_ok=True,
+            timeout=SHAKER_STOP_ACK_TIMEOUT,
+            epoch=epoch,
+            max_retries=1,
+        )
+        if result.get("superseded") or _shaker_epoch_value() != epoch:
+            return _superseded(str(result.get("cmd") or ""))
+        if _stop_acknowledged(result):
+            stop_shaker_live_state()
+            return result
+        last_result = result
+        time.sleep(0.15)
+    return last_result
 
 
 def ensure_shaker_stopped() -> Dict[str, Any]:
-    """One stop frame per firmware mode. A start that begins during this returns immediately."""
+    """Stop both firmware modes, retrying each until OK. A new start cancels the rest."""
     if not _ensure_stop_lock.acquire(blocking=False):
         return {"ok": True, "skipped": True}
     try:
@@ -1357,7 +1374,7 @@ def ensure_shaker_stopped() -> Dict[str, Any]:
             results[mode] = cmd_shaker_stop(mode, epoch=epoch)
             if results[mode].get("superseded"):
                 return {"ok": False, "superseded": True, "results": results}
-        ok = any(bool(item.get("ok")) for item in results.values())
+        ok = all(_stop_acknowledged(item) for item in results.values())
         return {"ok": ok, "results": results}
     finally:
         _ensure_stop_lock.release()
