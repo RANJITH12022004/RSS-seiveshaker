@@ -9,8 +9,8 @@
     <title>Sieve Shaker</title>
     <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
     <link rel="stylesheet" href="/keyboard.css">
-    <link rel="stylesheet" href="/styles.css?v=40" id="app-main-css"
-        onerror="(function(l){var n=parseInt(l.getAttribute('data-retry')||'0',10);if(n>=8)return;l.setAttribute('data-retry',String(n+1));setTimeout(function(){l.href='/styles.css?v=40&r='+(n+1)+'&t='+Date.now();},200*(n+1));})(this)">
+    <link rel="stylesheet" href="/styles.css?v=41" id="app-main-css"
+        onerror="(function(l){var n=parseInt(l.getAttribute('data-retry')||'0',10);if(n>=8)return;l.setAttribute('data-retry',String(n+1));setTimeout(function(){l.href='/styles.css?v=41&r='+(n+1)+'&t='+Date.now();},200*(n+1));})(this)">
 </head>
 
 <body>
@@ -315,7 +315,7 @@
                                 </svg>
                             </div>
                             <h2>Load Recipe</h2>
-                            <p>Test with saved recipe and tolerance checks</p>
+                            <p>Run a saved sieve shaker recipe.</p>
                         </div>
 
                         <div class="test-card" onclick="manageRecipes()" style="cursor: pointer;">
@@ -362,7 +362,7 @@
                     <div class="validation-type-page create-recipe-step1-page quick-test-page">
                         <div class="create-recipe-options">
                             <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Shaker Mode</h3>
+                                <h3 class="create-recipe-section-title">Test Mode</h3>
                                 <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="continuous">
                                         <input type="radio" name="quick-shaker-mode" value="CONTINUOUS" checked onchange="applyQuickShakerModeToFields()">
@@ -381,7 +381,7 @@
                         </div>
                         <div class="create-recipe-form-fields form-grid create-recipe-form-grid">
                             <div class="form-group full-width">
-                                <label>Recipe Name</label>
+                                <label>Product Name</label>
                                 <input type="text" id="quick-product-name" class="input-field" placeholder="">
                             </div>
                             <div class="form-group">
@@ -411,12 +411,18 @@
                                 <input type="number" id="quick-num-sieves" class="input-field" min="1" max="8" value="5"
                                     onchange="clampNumSievesInput('quick')" onblur="clampNumSievesInput('quick')">
                             </div>
-                            <div class="form-group">
+                            <div class="form-group full-width">
                                 <label>Weight Method</label>
-                                <select id="quick-weigh-method" class="input-field">
-                                    <option value="automatic">Automatic (IO Scale)</option>
-                                    <option value="manual">Manual (Type Weight)</option>
-                                </select>
+                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));" role="radiogroup" aria-label="Weight Method">
+                                    <label class="validation-type-settings-card create-recipe-card">
+                                        <input type="radio" name="quick-weigh-method" value="automatic" checked>
+                                        <h3>Automatic IO Scale</h3>
+                                    </label>
+                                    <label class="validation-type-settings-card create-recipe-card">
+                                        <input type="radio" name="quick-weigh-method" value="manual">
+                                        <h3>Manual Type Weight</h3>
+                                    </label>
+                                </div>
                             </div>
                             <div class="form-group full-width">
                                 <label>Sieve Analysis</label>
@@ -502,7 +508,7 @@
                     <div class="validation-type-page create-recipe-step1-page">
                         <div class="create-recipe-options">
                             <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Shaker Mode</h3>
+                                <h3 class="create-recipe-section-title">Test Mode</h3>
                                 <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="continuous">
                                         <input type="radio" name="recipe-shaker-mode" value="CONTINUOUS" checked onchange="applyRecipeShakerModeToFields()">
@@ -547,12 +553,18 @@
                                 <input type="number" id="recipe-num-sieves" class="input-field" min="1" max="8" value="5"
                                     onchange="clampNumSievesInput('recipe')" onblur="clampNumSievesInput('recipe')">
                             </div>
-                            <div class="form-group">
+                            <div class="form-group full-width">
                                 <label>Weight Method</label>
-                                <select id="recipe-weigh-method" class="input-field">
-                                    <option value="automatic">Automatic (IO Scale)</option>
-                                    <option value="manual">Manual (Type Weight)</option>
-                                </select>
+                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));" role="radiogroup" aria-label="Weight Method">
+                                    <label class="validation-type-settings-card create-recipe-card">
+                                        <input type="radio" name="recipe-weigh-method" value="automatic" checked>
+                                        <h3>Automatic IO Scale</h3>
+                                    </label>
+                                    <label class="validation-type-settings-card create-recipe-card">
+                                        <input type="radio" name="recipe-weigh-method" value="manual">
+                                        <h3>Manual Type Weight</h3>
+                                    </label>
+                                </div>
                             </div>
                             <div class="form-group full-width">
                                 <label>Sieve Analysis</label>
@@ -616,7 +628,7 @@
                                 <thead>
                                     <tr>
                                         <th>Product Name</th>
-                                        <th>Shaker Mode</th>
+                                        <th>Test Mode</th>
                                         <th>Amplitude</th>
                                         <th>Duration</th>
                                         <th>Sieves</th>
@@ -832,7 +844,7 @@
                 <div class="page" id="page-disable-recipes">
                     <div class="manage-recipes-container disable-recipes-page">
                         <h2 class="section-title">Disabled Recipes</h2>
-                        <p class="section-subtitle">Friability recipes removed from active use (requires recipe management approval to disable).</p>
+                        <p class="section-subtitle">Sieve shaker recipes removed from active use.</p>
                         <div class="recipe-list-container">
                             <p class="empty-state-message" id="disable-recipes-message">No disabled recipes.</p>
                             <table class="manage-recipes-table disable-recipes-table" style="display: none;">
@@ -840,7 +852,9 @@
                                     <tr>
                                         <th>Product Name</th>
                                         <th>Test Mode</th>
-                                        <th>RPM</th>
+                                        <th>Amplitude</th>
+                                        <th>Duration</th>
+                                        <th>Sieves</th>
                                         <th>Disabled By</th>
                                         <th>Disabled At</th>
                                     </tr>
@@ -1239,7 +1253,7 @@
                                     <td id="recipe-print-batch"></td>
                                 </tr>
                                 <tr>
-                                    <th>Vibration Mode</th>
+                                    <th>Test Mode</th>
                                     <td id="recipe-print-mode"></td>
                                 </tr>
                                 <tr>
@@ -1984,8 +1998,8 @@
     <script src="/keyboard.js?v=6"></script>
     <script src="/input-focus.js?v=1"></script>
     <script src="/rbac.js?v=9"></script>
-    <script src="/script.js?v=101"></script>
-    <script src="/shaker_ui.js?v=12"></script>
+    <script src="/script.js?v=102"></script>
+    <script src="/shaker_ui.js?v=15"></script>
 </body>
 
 </html>

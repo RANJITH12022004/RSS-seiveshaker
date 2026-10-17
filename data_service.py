@@ -405,9 +405,9 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
         if len(recipes) >= max_recipes:
             raise ValueError("Your limit for recipes reached. Contact support for upgrade.")
 
-    if recipe_id and is_update:
+    if is_update:
         for i, r in enumerate(recipes):
-            if r.get("id") == recipe_id:
+            if _norm_recipe_id(r.get("id")) == recipe_id:
                 recipes[i] = recipe_data
                 _save_json_file(recipes_path, recipes)
                 return recipe_id
@@ -416,7 +416,7 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
         recipe_data["id"] = recipe_id
         recipes.append(recipe_data)
     else:
-        max_id = max([r.get("id", 0) for r in recipes], default=0)
+        max_id = max([_norm_recipe_id(r.get("id")) or 0 for r in recipes], default=0)
         recipe_id = max_id + 1
         recipe_data["id"] = recipe_id
         recipes.append(recipe_data)

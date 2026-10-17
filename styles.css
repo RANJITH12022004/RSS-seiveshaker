@@ -577,8 +577,7 @@ body {
 }
 
 .sidebar {
-    background: var(--glass-bg);
-    backdrop-filter: blur(24px);
+    background: var(--bg-secondary);
     width: 108px;
     display: flex;
     flex-direction: column;
@@ -5787,13 +5786,11 @@ input[type="number"] {
 .app-container.validation-run-locked .nav-item[data-page],
 .app-container.test-run-locked .nav-item[data-page] {
     cursor: not-allowed;
-    opacity: 0.45;
 }
 
-/* Tap Density parity: lock entire sidebar while a run is active */
+/* Block sidebar clicks while a run is active. Do not fade the sidebar. */
 .sidebar.sidebar-locked {
     pointer-events: none;
-    opacity: 0.6;
 }
 
 

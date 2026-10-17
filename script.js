@@ -282,6 +282,7 @@ function _trAbortRunningTestNow() {
 
 function isValidationRunActive() {
     // Operation-based (do not require current page == validation-run).
+    if (typeof window._srIsValidationRunning === 'function' && window._srIsValidationRunning()) return true;
     return validationRunState === 'running' || !!validationRunBackendPending;
 }
 
@@ -1360,11 +1361,11 @@ function applyReportPreviewLockUi(preview) {
     var logoEl = document.getElementById('header-logo');
     if (logoEl) {
         logoEl.style.pointerEvents = locked ? 'none' : '';
-        logoEl.style.opacity = locked ? '0.45' : '';
+        logoEl.style.opacity = '';
     }
     document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
         btn.style.pointerEvents = locked ? 'none' : '';
-        btn.style.opacity = locked ? '0.45' : '';
+        btn.style.opacity = '';
         if (locked) btn.setAttribute('aria-disabled', 'true');
         else btn.removeAttribute('aria-disabled');
     });
@@ -1373,17 +1374,17 @@ function applyReportPreviewLockUi(preview) {
     [profileEl, logoutBtn].forEach(function (el) {
         if (!el) return;
         el.style.pointerEvents = locked ? 'none' : '';
-        el.style.opacity = locked ? '0.45' : '';
+        el.style.opacity = '';
         if (locked) el.setAttribute('aria-disabled', 'true');
         else el.removeAttribute('aria-disabled');
     });
     document.querySelectorAll('.test-card').forEach(function (el) {
         el.style.pointerEvents = locked ? 'none' : '';
-        el.style.opacity = locked ? '0.45' : '';
+        el.style.opacity = '';
     });
     document.querySelectorAll('#page-report-preview .btn-close, #page-report-preview .btn-secondary').forEach(function (el) {
         el.style.pointerEvents = locked ? 'none' : '';
-        el.style.opacity = locked ? '0.45' : '';
+        el.style.opacity = '';
         if (locked) el.setAttribute('aria-disabled', 'true');
         else el.removeAttribute('aria-disabled');
     });
@@ -4138,7 +4139,7 @@ function startQuickTestRunFromParams() {
     var customCompletionMode = completionRadio ? String(completionRadio.value || '').toUpperCase() : 'COUNT';
 
     if (!productName || !batchNumber) {
-        showAppModal('Please enter recipe name and batch number.', 'Quick Test');
+        showAppModal('Please enter product name and batch number.', 'Quick Test');
         return;
     }
     if (mode === 'USP') {
@@ -5999,7 +6000,7 @@ function populateRecipePrintPreview(recipe, factorySettings) {
         setRecipePrintEl('recipe-print-sieve-analysis', analysisOn ? 'ON' : 'OFF');
         if (tbody) {
             var rows = [
-                ['Vibration Mode', recipe.shakerMode || '--', ''],
+                ['Test Mode', recipe.shakerMode || '--', ''],
                 ['Amplitude', formatAmplitudeDisplay(recipe.amplitude), 'mm'],
                 ['Duration', recipeTimeDisplay(recipe), 'MM:SS'],
                 ['No. of Sieves', recipe.numSieves != null ? String(recipe.numSieves) : '--', ''],
@@ -8070,39 +8071,6 @@ function disableRecipe(id, opts) {
         headers: headers,
         body: { remarks: remarks }
     }).then(function () {
-        try {
-            // Keep a local list of disabled recipes so the Disable page only shows those
-            var disabled = [];
-            try {
-                var raw = localStorage.getItem('disabledRecipes');
-                if (raw) disabled = JSON.parse(raw) || [];
-            } catch (e) {}
-
-            var recipe = null;
-            if (Array.isArray(lastDisplayedRecipes)) {
-                recipe = lastDisplayedRecipes.find(function (r) { return r.id === id; }) || null;
-            }
-
-            if (recipe) {
-                var u = window.currentUser || {};
-                var entry = {
-                    id: recipe.id,
-                    name: recipe.productName || recipe.name || '--',
-                    testMode: recipeTestModeLabel(recipe),
-                    rpm: recipeRpm(recipe),
-                    time: recipeTimeDisplay(recipe),
-                    rotations: recipeRotationsDisplay(recipe),
-                    drumCount: parseInt(recipe.drumCount, 10) === 1 ? 1 : 2,
-                    disabledBy: String(u.name || u.username || '—').trim(),
-                    disabledAt: new Date().toISOString()
-                };
-                // Avoid duplicates
-                disabled = disabled.filter(function (d) { return d.id !== entry.id; });
-                disabled.push(entry);
-                localStorage.setItem('disabledRecipes', JSON.stringify(disabled));
-            }
-        } catch (e) {}
-
         loadManageRecipes();
         showAppModal('Recipe disabled.', 'Disable Recipe');
     });
@@ -8427,7 +8395,7 @@ function loadManageRecipes() {
                 if (mode === 'load') {
                     headRow.innerHTML =
                         '<th>Product Name</th>' +
-                        '<th>Shaker Mode</th>' +
+                        '<th>Test Mode</th>' +
                         '<th>Amplitude</th>' +
                         '<th>Duration</th>' +
                         '<th>Sieves</th>' +
@@ -8435,7 +8403,7 @@ function loadManageRecipes() {
                 } else {
                     headRow.innerHTML =
                         '<th>Product Name</th>' +
-                        '<th>Shaker Mode</th>' +
+                        '<th>Test Mode</th>' +
                         '<th>Amplitude</th>' +
                         '<th>Duration</th>' +
                         '<th>Sieves</th>' +
@@ -8500,6 +8468,14 @@ function loadManageRecipes() {
     });
 }
 
+function sieveDisabledModeLabel(mode) {
+    var m = String(mode || '').toUpperCase();
+    if (m === 'CONTINUOUS') return 'Continuous';
+    if (m === 'INTERMITTENT') return 'Intermittent';
+    if (m === 'LOGICAL') return 'Logical';
+    return mode ? String(mode) : '--';
+}
+
 function loadDisableRecipes() {
     var msgEl = document.getElementById('disable-recipes-message');
     var tableEl = document.querySelector('#page-disable-recipes .manage-recipes-table');
@@ -8507,39 +8483,47 @@ function loadDisableRecipes() {
     if (!tbody) return;
 
     tbody.innerHTML = '';
+    if (msgEl) {
+        msgEl.textContent = 'No disabled recipes.';
+        msgEl.style.display = '';
+    }
+    if (tableEl) tableEl.style.display = 'none';
 
-    var disabled = [];
-    try {
-        var raw = localStorage.getItem('disabledRecipes');
-        if (raw) disabled = JSON.parse(raw) || [];
-    } catch (e) {}
+    apiRequest(API_BASE + '/api/data/recipes/disabled', { method: 'GET' }).then(function (data) {
+        var disabled = (data && data.recipes) || [];
+        if (!disabled.length) return;
 
-    if (!disabled || !disabled.length) {
+        if (msgEl) msgEl.style.display = 'none';
+        if (tableEl) tableEl.style.display = '';
+
+        disabled.forEach(function (r) {
+            var tr = document.createElement('tr');
+            var name = r.productName || r.name || '--';
+            var modeLabel = sieveDisabledModeLabel(r.shakerMode);
+            var ampStr = typeof formatAmplitudeDisplay === 'function' ? formatAmplitudeDisplay(r.amplitude) : (r.amplitude != null ? String(r.amplitude) : '--');
+            var durSec = parseInt(r.durationSeconds, 10);
+            var timeStr = !isNaN(durSec) && durSec > 0 && typeof formatSecondsToMmSs === 'function'
+                ? formatSecondsToMmSs(durSec)
+                : '--';
+            var sieveCount = r.numSieves != null ? r.numSieves : (Array.isArray(r.sieveSizes) ? r.sieveSizes.length : null);
+            var sieveStr = sieveCount != null ? String(sieveCount) : '--';
+            var disabledBy = r.disabledBy || '--';
+            var disabledAt = formatDisabledRecipeTimestamp(r.disabledAt);
+            tr.innerHTML =
+                '<td>' + name + '</td>' +
+                '<td>' + modeLabel + '</td>' +
+                '<td>' + ampStr + '</td>' +
+                '<td>' + timeStr + '</td>' +
+                '<td>' + sieveStr + '</td>' +
+                '<td>' + disabledBy + '</td>' +
+                '<td>' + disabledAt + '</td>';
+            tbody.appendChild(tr);
+        });
+    }).catch(function () {
         if (msgEl) {
-            msgEl.textContent = 'No disabled recipes.';
+            msgEl.textContent = 'Could not load disabled recipes.';
             msgEl.style.display = '';
         }
-        if (tableEl) tableEl.style.display = 'none';
-        return;
-    }
-
-    if (msgEl) msgEl.style.display = 'none';
-    if (tableEl) tableEl.style.display = '';
-
-    disabled.forEach(function (r) {
-        var tr = document.createElement('tr');
-        var name = r.name || '--';
-        var modeLabel = r.testMode || '--';
-        var rpmStr = r.rpm != null ? String(r.rpm) : '--';
-        var disabledBy = r.disabledBy || '--';
-        var disabledAt = formatDisabledRecipeTimestamp(r.disabledAt);
-        tr.innerHTML =
-            '<td>' + name + '</td>' +
-            '<td>' + modeLabel + '</td>' +
-            '<td>' + rpmStr + '</td>' +
-            '<td>' + disabledBy + '</td>' +
-            '<td>' + disabledAt + '</td>';
-        tbody.appendChild(tr);
     });
 }
 

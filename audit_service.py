@@ -26,17 +26,16 @@ FACTORY_USERNAME = "RLERLT"
 FACTORY_ROLE = "Factory"
 
 
-def _is_suppressed_actor(user: Optional[str], role: Optional[str]) -> bool:
-    """Return True when the direct actor is the hardcoded factory super-user.
+def _is_suppressed_actor(user: Optional[str], role: Optional[str] = None) -> bool:
+    """Return True when the direct actor username is the factory super-user.
 
-    Per product directive: rows whose actor (`user`) is RLERLT acting as
-    Factory must never be written to the audit log. Other relationships
-    (sessionUser / signatureUser / targetUser) are not considered here -
+    Any actor whose username is RLERLT is suppressed, ignoring case, even
+    when the role is missing or spelled differently. Other relationships
+    (sessionUser / signatureUser / targetUser) are not considered here —
     they remain logged normally when the actor is someone else.
     """
-    u = (user or "").strip()
-    r = (role or "").strip()
-    return u == FACTORY_USERNAME and r.lower() == FACTORY_ROLE.lower()
+    u = (user or "").strip().upper()
+    return u == FACTORY_USERNAME.upper()
 
 
 def is_hidden_factory_actor(user: Optional[str], role: Optional[str]) -> bool:
@@ -366,8 +365,7 @@ def _entry_for_response(entry: Dict[str, Any]) -> Dict[str, Any]:
 def log_event(user: Optional[str], role: Optional[str], action: str, details: str = ""):
     """Append one audit entry.
 
-    Entries where the actor is the hardcoded factory super-user
-    (user == RLERLT and role == Factory) are silently dropped.
+    Entries whose actor username is RLERLT (any case, any role) are silently dropped.
     """
     log_structured_event(
         user=user,
@@ -757,10 +755,8 @@ def list_entries(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any
         where = ["1=1"]
         params: List[Any] = []
         # Never return rows for the hidden factory actor (UI, export, PDF).
-        where.append(
-            "NOT (TRIM(COALESCE(user, '')) = ? AND LOWER(TRIM(COALESCE(role, ''))) = LOWER(?))"
-        )
-        params.extend((FACTORY_USERNAME, FACTORY_ROLE))
+        where.append("UPPER(TRIM(COALESCE(user, ''))) != UPPER(?)")
+        params.append(FACTORY_USERNAME)
         user_val = filters.get("user")
         if user_val:
             where.append("COALESCE(user, '--') = ?")

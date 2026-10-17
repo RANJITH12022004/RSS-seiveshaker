@@ -402,6 +402,21 @@
         return { numSieves: n, sieveSizes: sizes, sieveAnalysis: getSieveAnalysisFlag(prefix) };
     }
 
+    function _weighMethodValue(raw) {
+        return String(raw || '').trim().toLowerCase() === 'manual' ? 'manual' : 'automatic';
+    }
+
+    function _readWeighMethod(name) {
+        var selected = document.querySelector('input[name="' + name + '"]:checked');
+        return _weighMethodValue(selected ? selected.value : 'automatic');
+    }
+
+    function _writeWeighMethod(name, raw) {
+        var value = _weighMethodValue(raw);
+        var radio = document.querySelector('input[name="' + name + '"][value="' + value + '"]');
+        if (radio) radio.checked = true;
+    }
+
     function buildShakerRecipeFromQuickForm() {
         var productName = (document.getElementById('quick-product-name') || {}).value || '';
         var batchNumber = (document.getElementById('quick-batch-number') || {}).value || '';
@@ -412,7 +427,7 @@
         productName = productName.trim();
         batchNumber = batchNumber.trim();
         if (!productName || !batchNumber) {
-            showAppModal('Please enter recipe name and batch number.', 'Quick Test');
+            showAppModal('Please enter product name and batch number.', 'Quick Test');
             return null;
         }
         if (isNaN(amplitudeRaw) || amplitudeRaw < 0.5 || amplitudeRaw > 3.0) {
@@ -425,7 +440,7 @@
             return null;
         }
         var sieveData = collectSieveData('quick');
-        var weighMethod = ((document.getElementById('quick-weigh-method') || {}).value) || 'automatic';
+        var weighMethod = _readWeighMethod('quick-weigh-method');
         var recipe = {
             productName: productName,
             batchNumber: batchNumber,
@@ -480,7 +495,10 @@
         startTestRun(recipe);
     };
 
+    var _recipeSaveInFlight = false;
+
     window.saveRecipeFromParams = function () {
+        if (_recipeSaveInFlight) return;
         var productName = ((document.getElementById('recipe-product-name') || {}).value || '').trim();
         var amplitudeRaw = typeof normalizeAmplitudeValue === 'function'
             ? normalizeAmplitudeValue((document.getElementById('recipe-amplitude') || {}).value)
@@ -500,7 +518,7 @@
             return;
         }
         var sieveData = collectSieveData('recipe');
-        var weighMethod = ((document.getElementById('recipe-weigh-method') || {}).value) || 'automatic';
+        var weighMethod = _readWeighMethod('recipe-weigh-method');
         var recipe = {
             productName: productName,
             shakerMode: mode,
@@ -548,7 +566,15 @@
         if (editId) recipe.id = editId;
         var url = editId ? (API_BASE + '/api/data/recipes/' + editId) : (API_BASE + '/api/data/recipes');
         var method = editId ? 'PUT' : 'POST';
+        _recipeSaveInFlight = true;
+        var saveBtn = document.querySelector('#page-create-recipe-step1 .validation-start-btn');
+        if (saveBtn) saveBtn.disabled = true;
+        function releaseRecipeSave() {
+            _recipeSaveInFlight = false;
+            if (saveBtn) saveBtn.disabled = false;
+        }
         apiRequest(url, { method: method, body: recipe }).then(function (result) {
+            releaseRecipeSave();
             window.currentEditingRecipeId = null;
             if (typeof recipeListMode !== 'undefined') recipeListMode = 'manage';
             goToPage('manage-recipes');
@@ -564,6 +590,7 @@
                 }, 50);
             }
         }).catch(function (err) {
+            releaseRecipeSave();
             showAppModal('Failed to save recipe: ' + ((err && err.message) ? err.message : 'Unknown error'), 'Create Recipe');
         });
     };
@@ -584,6 +611,15 @@
         runEndElapsedSeconds: 0,
         pollStartTime: 0
     };
+
+    function _syncShakerNavLock() {
+        var active = !!(_sr.weighingActive || (_sr.running && !_sr.done));
+        var beforeWizard = document.getElementById('tr-before-wizard');
+        var afterWizard = document.getElementById('tr-after-wizard');
+        if (beforeWizard && beforeWizard.style.display && beforeWizard.style.display !== 'none') active = true;
+        if (afterWizard && afterWizard.style.display && afterWizard.style.display !== 'none') active = true;
+        if (typeof setTestRunNavigationLock === 'function') setTestRunNavigationLock(active);
+    }
 
     function _srEl(id) { return document.getElementById(id); }
 
@@ -760,6 +796,7 @@
         _wzHideAndClear('tr-before-wizard');
         _wzHideAndClear('tr-after-wizard');
         _sr.weighingActive = false;
+        _syncShakerNavLock();
     };
 
     function _srSetSieveSvg(recipe) {
@@ -932,6 +969,7 @@
         var recipe = _sr.recipe || {};
         var analysisOn = isSieveAnalysisOn(recipe);
         // Analysis OFF: sample already weighed before start — skip after wizard entirely.
+        _syncShakerNavLock();
         if (!analysisOn) {
             _sr.afterWeightsByIdx = [];
             _sr.fractions = [];
@@ -1030,6 +1068,7 @@
         _wzHideAndClear('tr-after-wizard');
         if (container) container.style.display = 'flex';
         _sr.weighingActive = true;
+        _syncShakerNavLock();
         _srMarkActivity();
         _srWriteCheckpoint('weighing');
 
@@ -1107,6 +1146,7 @@
             if (currentStep >= steps.length) {
                 _wzHideAndClear(cid);
                 _sr.weighingActive = false;
+                _syncShakerNavLock();
                 onComplete(weights);
                 return;
             }
@@ -1148,6 +1188,7 @@
         _wzHideAndClear('tr-before-wizard');
         if (container) container.style.display = 'flex';
         _sr.weighingActive = true;
+        _syncShakerNavLock();
         _srMarkActivity();
         _srWriteCheckpoint('weighing');
 
@@ -1186,6 +1227,7 @@
             _wzOnWeight = null;
             _wzHideAndClear(cid);
             _sr.weighingActive = false;
+            _syncShakerNavLock();
             _sr.afterWeightsByIdx = [];
             _sr.fractions = [];
             _sr.panFraction = 0;
@@ -1316,6 +1358,7 @@
         _sr.weighingActive = false;
         _wzHideAndClear('tr-before-wizard');
         _wzHideAndClear('tr-after-wizard');
+        _syncShakerNavLock();
         var payload = _srBuildReportPayload({ aborted: !!_sr.abortedRun });
         return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload }).then(function (res) {
             var reportId = res && (res.id != null ? res.id : (res.report && res.report.id));
@@ -1363,6 +1406,7 @@
             // Start timer immediately so elapsed time runs regardless of API latency
             _sr.running = true;
             _sr.weighingActive = false;
+            _syncShakerNavLock();
             _srSetButtons('running');
             if (_srEl('tr-footer-note')) _srEl('tr-footer-note').textContent = 'Test Running\u2026';
             _srStartPoll();
@@ -1371,6 +1415,7 @@
                     if (!res || !res.ok) {
                         // Stop timer and revert on hard failure
                         _sr.running = false;
+                        _syncShakerNavLock();
                         if (_sr.livePollInterval) { clearInterval(_sr.livePollInterval); _sr.livePollInterval = null; }
                         _srSetButtons('idle');
                         if (_srEl('tr-footer-note')) _srEl('tr-footer-note').textContent = 'Press Start to begin the shaker program.';
@@ -1384,6 +1429,7 @@
                 })
                 .catch(function (err) {
                     _sr.running = false;
+                    _syncShakerNavLock();
                     if (_sr.livePollInterval) { clearInterval(_sr.livePollInterval); _sr.livePollInterval = null; }
                     _srSetButtons('idle');
                     if (_srEl('tr-footer-note')) _srEl('tr-footer-note').textContent = 'Press Start to begin the shaker program.';
@@ -1490,8 +1536,7 @@
             }
             if (typeof validateSieveOrder === 'function') validateSieveOrder('recipe');
             setSieveAnalysisFlag('recipe', r.sieveAnalysis !== false);
-            var wmEl = document.getElementById('recipe-weigh-method');
-            if (wmEl && r.weighMethod) wmEl.value = String(r.weighMethod);
+            if (r.weighMethod) _writeWeighMethod('recipe-weigh-method', r.weighMethod);
             if (mode === 'LOGICAL') {
                 // Restore fields from saved logicalRunSeconds / logicalWaitSeconds / durationSeconds
                 var loadRunSec  = r.logicalRunSeconds  || 0;
@@ -1710,8 +1755,10 @@
         apiRequest(API_BASE + '/api/hardware/shaker/start', { method: 'POST', body: program }).then(function () {
             _valState.running = true;
             _valState.aborted = false;
+            _valState.stopCommandSent = false;
             _valState.startTime = Date.now();
             _valState.startIso = _valNowIso();
+            if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(true);
             var typeLabel = _valTypeLabel(_valState.type);
             var durLabel = typeof formatSecondsToMmSs === 'function' ? formatSecondsToMmSs(_valState.durationSec) : String(_valState.durationSec);
             if (typeof logAuditEvent === 'function') {
@@ -1738,11 +1785,15 @@
     };
 
     function _stopShakerValidation(aborted) {
-        var mode = _valHwMode(_valState.type);
-        apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
+        if (aborted || !_valState.stopCommandSent) {
+            _valState.stopCommandSent = true;
+            var mode = _valHwMode(_valState.type);
+            apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
+        }
         _valState.runEndElapsedSeconds = _valCaptureElapsed();
         _valState.running = false;
         _valState.aborted = !!aborted;
+        if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(false);
         _stopValPoll();
         var timerEl = document.getElementById('val-drum-timer');
         if (timerEl && typeof formatSecondsToMmSs === 'function') {
@@ -1780,19 +1831,30 @@
         }
     }
 
+    var SHAKER_STOP_LEAD_MS = 1800;
+
     function _startValPoll() {
         if (_valState.pollInterval) clearInterval(_valState.pollInterval);
+        _valState.stopCommandSent = false;
         _valState.pollInterval = setInterval(function () {
             if (!_valState.running || !_valState.startTime) return;
-            var elapsed = Math.floor((Date.now() - _valState.startTime) / 1000);
+            var elapsedMs = Date.now() - _valState.startTime;
+            var elapsed = Math.floor(elapsedMs / 1000);
             var el = document.getElementById('val-drum-timer');
             if (el && typeof formatSecondsToMmSs === 'function') el.textContent = formatSecondsToMmSs(elapsed);
             _valWriteCheckpoint('running');
-            if (elapsed >= (_valState.durationSec || 0)) {
-                _valState.runEndElapsedSeconds = elapsed;
+            var durMs = (_valState.durationSec || 0) * 1000;
+            var leadMs = durMs > SHAKER_STOP_LEAD_MS + 500 ? SHAKER_STOP_LEAD_MS : 0;
+            if (!_valState.stopCommandSent && elapsedMs >= durMs - leadMs) {
+                _valState.stopCommandSent = true;
+                var mode = _valHwMode(_valState.type);
+                apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
+            }
+            if (elapsedMs >= durMs) {
+                _valState.runEndElapsedSeconds = _valState.durationSec || elapsed;
                 _stopShakerValidation(false);
             }
-        }, 1000);
+        }, 200);
     }
 
     function _stopValPoll() {
@@ -1885,6 +1947,7 @@
         _valState.aborted = true;
         _valState.running = false;
         _valState.awaitingActualAmplitude = false;
+        if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(false);
         _stopValPoll();
         var mode = _valHwMode(_valState.type);
         return apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } })
@@ -2001,6 +2064,7 @@
             _wzHideAndClear('tr-before-wizard');
             _wzHideAndClear('tr-after-wizard');
             _sr.weighingActive = false;
+            _syncShakerNavLock();
             return _srSavePartialReport();
         };
         if (_sr.running) {
