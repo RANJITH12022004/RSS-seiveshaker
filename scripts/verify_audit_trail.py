@@ -529,6 +529,50 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
     }
     _run_recovery(val_cp, "Validation checkpoint recovery", "validation", 12)
 
+    # Checkpoint must recover even if pending session file never made it to disk.
+    no_pending_cp = dict(test_cp)
+    no_pending_cp["testData"] = dict(test_cp["testData"])
+    no_pending_cp["testData"]["productName"] = "No Pending File"
+    no_pending_cp["recipe"] = dict(test_cp["recipe"])
+    no_pending_cp["recipe"]["productName"] = "No Pending File"
+    for name in (
+        "reports.json",
+        "test_run.json",
+        "session_power_audit_pending.json",
+        "app_clean_stop.flag",
+        "current_user.json",
+    ):
+        path = storage / name
+        if path.exists():
+            path.unlink()
+    data_service.save_test_run_data(no_pending_cp)
+    data_service.init(config)
+    since_ms = ts_ms() - 1000
+    startup_power_audit()
+    no_pending_reports = data_service.list_reports("all", include_pending=True)
+    if len(no_pending_reports) != 1:
+        res.fail(
+            "Checkpoint without pending file: expected 1 recovered report, got {}".format(
+                len(no_pending_reports)
+            )
+        )
+    else:
+        _assert_recovered_report(
+            no_pending_reports[0],
+            "Checkpoint without pending file",
+            "test",
+            30,
+        )
+        logout_rows = [
+            e
+            for e in audit_service.list_entries({"from": since_ms})
+            if e.get("action") == "Power interruption logout"
+        ]
+        if logout_rows:
+            res.ok("Power interruption logout logged from checkpoint operator (no pending file)")
+        else:
+            res.fail("Checkpoint without pending file: missing Power interruption logout")
+
     for name in ("reports.json", "test_run.json"):
         path = storage / name
         if path.exists():

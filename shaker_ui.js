@@ -188,6 +188,16 @@
         return Math.max(local, backend, 0);
     }
 
+    function _srLoggedElapsed(opts) {
+        opts = opts || {};
+        var aborted = !!(opts.aborted || _sr.abortedRun);
+        var early = !!(opts.early || _sr.completedEarly);
+        if (!aborted && !early && _sr.targetSeconds && (_sr.done || opts.finished)) {
+            return _sr.targetSeconds;
+        }
+        return Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || _srCaptureRunElapsed() || 0);
+    }
+
     function _wzParseManualWeight(raw) {
         var s = String(raw || '').trim();
         if (!s || !/^\d+(\.\d{1,4})?$/.test(s)) return null;
@@ -664,8 +674,8 @@
                 intermittentOnSeconds: recipe.intermittentOnSeconds,
                 intermittentOffSeconds: recipe.intermittentOffSeconds,
                 logicalSegments: recipe.logicalSegments,
-                actualElapsedSeconds: Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0),
-                elapsedSeconds: Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0),
+                actualElapsedSeconds: Math.floor(_srLoggedElapsed({ aborted: aborted })),
+                elapsedSeconds: Math.floor(_srLoggedElapsed({ aborted: aborted })),
                 completedEarly: _sr.completedEarly,
                 status: aborted ? 'Aborted' : 'Completed',
                 testStatus: 'Pending',
@@ -704,8 +714,8 @@
                 payload.testData.status = _sr.running ? 'running' : (payload.testData.status || 'running');
                 payload.testData.durationSeconds = _sr.targetSeconds;
                 payload.testData.setDurationSeconds = _sr.targetSeconds;
-                payload.testData.actualElapsedSeconds = Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0);
-                payload.testData.elapsedSeconds = Math.floor(_sr.runEndElapsedSeconds || _sr.elapsedSeconds || 0);
+                payload.testData.actualElapsedSeconds = Math.floor(_srLoggedElapsed());
+                payload.testData.elapsedSeconds = Math.floor(_srLoggedElapsed());
                 payload.testData.testStartTime = _sr.testStartIso || payload.testData.testStartTime || nowIso;
                 payload.testData.testEndTime = nowIso;
             }
@@ -891,7 +901,11 @@
         return apiRequest(API_BASE + '/api/hardware/shaker/live', { method: 'GET' }).then(function (data) {
             _srRefreshFromLive(data);
             if (data && data.programDone && _sr.running) {
-                _sr.runEndElapsedSeconds = _srCaptureRunElapsed();
+                if (!_sr.completedEarly) {
+                    _sr.runEndElapsedSeconds = _sr.targetSeconds || _srCaptureRunElapsed();
+                } else {
+                    _sr.runEndElapsedSeconds = _srCaptureRunElapsed();
+                }
                 _sr.elapsedSeconds = _sr.runEndElapsedSeconds;
                 _srFinishRun(false);
             }
@@ -905,6 +919,7 @@
         _sr.pollStartTime = Date.now();
         _sr.livePollInterval = setInterval(function () {
             var localElapsed = (Date.now() - _sr.pollStartTime) / 1000;
+            if (_sr.targetSeconds && localElapsed > _sr.targetSeconds) localElapsed = _sr.targetSeconds;
             _sr.elapsedSeconds = Math.max(_sr.elapsedSeconds || 0, localElapsed);
             var elapsedStr = formatSecondsToMmSs(Math.floor(localElapsed));
             if (_srEl('tr-timer-right')) _srEl('tr-timer-right').textContent = elapsedStr;
@@ -953,7 +968,13 @@
     }
 
     function _srFinishRun(aborted) {
-        if (!_sr.runEndElapsedSeconds) {
+        if (aborted) {
+            if (!_sr.runEndElapsedSeconds) {
+                _sr.runEndElapsedSeconds = _srCaptureRunElapsed();
+            }
+        } else if (!_sr.completedEarly) {
+            _sr.runEndElapsedSeconds = _sr.targetSeconds || _srCaptureRunElapsed();
+        } else if (!_sr.runEndElapsedSeconds) {
             _sr.runEndElapsedSeconds = _srCaptureRunElapsed();
         }
         _sr.elapsedSeconds = _sr.runEndElapsedSeconds;
@@ -1611,6 +1632,13 @@
         return _valState.startTime ? Math.floor((Date.now() - _valState.startTime) / 1000) : 0;
     }
 
+    function _valLoggedElapsed() {
+        if (!_valState.aborted && !_valState.running && _valState.durationSec) {
+            return _valState.durationSec;
+        }
+        return _valState.runEndElapsedSeconds || _valCaptureElapsed();
+    }
+
     function _valNowIso() {
         return typeof formatLocalWallClockIso === 'function' ? formatLocalWallClockIso() : new Date().toISOString();
     }
@@ -1634,7 +1662,7 @@
 
     function _valWriteCheckpoint(phase) {
         try {
-            var elapsed = _valState.runEndElapsedSeconds || _valCaptureElapsed();
+            var elapsed = _valLoggedElapsed();
             var nowIso = _valNowIso();
             var payload = {
                 type: 'validation',
@@ -1656,6 +1684,8 @@
                     testEndTime: nowIso,
                     testedBy: typeof getCurrentUser === 'function' ? getCurrentUser() : ''
                 },
+                operatedByUsername: typeof getCurrentUser === 'function' ? getCurrentUser() : '',
+                operatorName: typeof getCurrentUser === 'function' ? getCurrentUser() : '',
                 _checkpointPhase: phase || 'running',
                 _checkpointAt: nowIso,
                 createdAt: _valState.startIso || nowIso,
@@ -1785,12 +1815,12 @@
     };
 
     function _stopShakerValidation(aborted) {
-        if (aborted || !_valState.stopCommandSent) {
-            _valState.stopCommandSent = true;
-            var mode = _valHwMode(_valState.type);
-            apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
+        _valEnsureStopped();
+        if (aborted) {
+            _valState.runEndElapsedSeconds = _valCaptureElapsed();
+        } else {
+            _valState.runEndElapsedSeconds = _valState.durationSec || _valCaptureElapsed();
         }
-        _valState.runEndElapsedSeconds = _valCaptureElapsed();
         _valState.running = false;
         _valState.aborted = !!aborted;
         if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(false);
@@ -1831,7 +1861,15 @@
         }
     }
 
-    var SHAKER_STOP_LEAD_MS = 1800;
+    function _valEnsureStopped() {
+        _valState.stopCommandSent = true;
+        return apiRequest(API_BASE + '/api/hardware/shaker/ensure-stopped', { method: 'POST', body: {} })
+            .catch(function () {
+                var mode = _valHwMode(_valState.type);
+                return apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } })
+                    .catch(function () { return null; });
+            });
+    }
 
     function _startValPoll() {
         if (_valState.pollInterval) clearInterval(_valState.pollInterval);
@@ -1840,16 +1878,11 @@
             if (!_valState.running || !_valState.startTime) return;
             var elapsedMs = Date.now() - _valState.startTime;
             var elapsed = Math.floor(elapsedMs / 1000);
+            if (_valState.durationSec && elapsed > _valState.durationSec) elapsed = _valState.durationSec;
             var el = document.getElementById('val-drum-timer');
             if (el && typeof formatSecondsToMmSs === 'function') el.textContent = formatSecondsToMmSs(elapsed);
             _valWriteCheckpoint('running');
             var durMs = (_valState.durationSec || 0) * 1000;
-            var leadMs = durMs > SHAKER_STOP_LEAD_MS + 500 ? SHAKER_STOP_LEAD_MS : 0;
-            if (!_valState.stopCommandSent && elapsedMs >= durMs - leadMs) {
-                _valState.stopCommandSent = true;
-                var mode = _valHwMode(_valState.type);
-                apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
-            }
             if (elapsedMs >= durMs) {
                 _valState.runEndElapsedSeconds = _valState.durationSec || elapsed;
                 _stopShakerValidation(false);
@@ -1865,7 +1898,7 @@
         _valState.awaitingActualAmplitude = false;
         var confirmEl = document.getElementById('val-confirm-section');
         if (confirmEl) confirmEl.style.display = 'none';
-        var elapsed = _valState.runEndElapsedSeconds || _valCaptureElapsed();
+        var elapsed = _valLoggedElapsed();
         var endIso = _valNowIso();
         var startIso = _valState.startIso || endIso;
         var setDurLabel = typeof formatSecondsToMmSs === 'function' ? formatSecondsToMmSs(_valState.durationSec) : String(_valState.durationSec);
@@ -1904,16 +1937,18 @@
             createdAt: startIso
         };
 
-        apiRequest(API_BASE + '/api/data/reports', {
-            method: 'POST',
-            body: {
-                type: 'validation',
-                name: 'Sieve Shaker Validation - ' + _valTypeLabel(_valState.type),
-                testData: validationReport,
-                isValidation: true,
-                createdAt: startIso,
-                completedAt: endIso
-            }
+        _valEnsureStopped().then(function () {
+            return apiRequest(API_BASE + '/api/data/reports', {
+                method: 'POST',
+                body: {
+                    type: 'validation',
+                    name: 'Sieve Shaker Validation - ' + _valTypeLabel(_valState.type),
+                    testData: validationReport,
+                    isValidation: true,
+                    createdAt: startIso,
+                    completedAt: endIso
+                }
+            });
         }).then(function (res) {
             return _valClearCheckpoint().then(function () { return res; });
         }).then(function (res) {
@@ -1949,9 +1984,7 @@
         _valState.awaitingActualAmplitude = false;
         if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(false);
         _stopValPoll();
-        var mode = _valHwMode(_valState.type);
-        return apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } })
-            .catch(function () { return null; })
+        return _valEnsureStopped()
             .then(function () {
                 var elapsed = _valState.startTime ? Math.floor((Date.now() - _valState.startTime) / 1000) : 0;
                 var endIso = _valNowIso();

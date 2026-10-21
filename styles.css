@@ -827,7 +827,7 @@ body {
 
 .test-options {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: var(--spacing-xl);
     max-width: 920px;
     width: 100%;

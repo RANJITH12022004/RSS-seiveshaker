@@ -3020,6 +3020,10 @@ function loginBiometric() {
             showMandatoryPasswordResetScreen(data.username);
             return;
         }
+        if (result.status === 403 && data && data.passwordExpired && data.username) {
+            if (typeof showPasswordExpiredResetScreen === 'function') showPasswordExpiredResetScreen(data.username);
+            return;
+        }
         var msg = (data && data.error) ? String(data.error) : 'Biometric login failed.';
         showAppModal(msg, 'Biometric Login');
     }).catch(function (err) {

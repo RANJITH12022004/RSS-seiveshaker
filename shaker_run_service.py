@@ -24,21 +24,6 @@ def _now() -> float:
     return time.time()
 
 
-# Measured while the shaker was running at minimum amplitude on this machine:
-# continuous stop OK in 1.88s, intermittent stop OK in 1.78s. The frame is sent
-# this long before the scheduled end so the motor is off when that time arrives.
-# Abort and early complete still stop immediately.
-SHAKER_STOP_LEAD_SEC = 1.8
-
-
-def _stop_lead(duration_sec: float) -> float:
-    """How early to transmit stop. Short runs keep the full set time."""
-    duration = max(0.0, float(duration_sec))
-    if duration <= SHAKER_STOP_LEAD_SEC + 0.5:
-        return 0.0
-    return SHAKER_STOP_LEAD_SEC
-
-
 def _normalize_mode(mode: str) -> str:
     m = str(mode or "CONTINUOUS").strip().upper()
     if m in ("C", "CONTINUOUS"):
@@ -81,6 +66,11 @@ def _sleep_until(
 
 def _ensure_off(hw_mode: str) -> None:
     hardware_service.cmd_shaker_stop(hw_mode)
+
+
+def _ensure_all_off() -> None:
+    """Cut both C and I. Intermittent keeps running if only #00C or only #00I is sent."""
+    hardware_service.ensure_shaker_stopped()
 
 
 def _run_on(amplitude: int, hw_mode: str) -> dict:
@@ -126,20 +116,15 @@ def _run_continuous(program: Dict[str, Any]) -> None:
         )
 
     _run_on(amplitude, hw_mode)
-    stop_at = start + duration
-    send_stop_at = stop_at - _stop_lead(duration)
-    interrupted = _sleep_until(send_stop_at, on_tick=publish_progress)
+    interrupted = _sleep_until(start + duration, on_tick=publish_progress)
+    stop_thread = None
     if interrupted:
-        _ensure_off(hw_mode)
+        _ensure_all_off()
+        elapsed = min(duration, max(0.0, _now() - start))
     else:
-        # Stop is already on the wire. Keep the clock running until the set time,
-        # which is when the firmware finishes acting on that frame.
-        stop_thread = threading.Thread(target=_ensure_off, args=(hw_mode,), daemon=True)
+        stop_thread = threading.Thread(target=_ensure_all_off, daemon=True)
         stop_thread.start()
-        if _sleep_until(stop_at, on_tick=publish_progress):
-            interrupted = True
-        stop_thread.join()
-    elapsed = min(duration, max(0.0, _now() - start))
+        elapsed = float(duration)
     _update_progress(
         phase="off",
         elapsed_sec=elapsed,
@@ -148,6 +133,8 @@ def _run_continuous(program: Dict[str, Any]) -> None:
         program_done=True,
         completed_early=interrupted and not _abort_event.is_set(),
     )
+    if stop_thread is not None:
+        stop_thread.join()
 
 
 def _run_intermittent(program: Dict[str, Any]) -> None:
@@ -186,24 +173,17 @@ def _run_logical(program: Dict[str, Any]) -> None:
 
         if seg_type == "run":
             _run_on(amplitude, hw_mode)
-            send_stop_at = seg_end - _stop_lead(seg_dur)
-            if _sleep_until(send_stop_at, on_tick=publish_segment_progress):
-                break
-            stop_thread = threading.Thread(target=_ensure_off, args=(hw_mode,), daemon=True)
-            stop_thread.start()
-            interrupted = _sleep_until(seg_end, on_tick=publish_segment_progress)
-            stop_thread.join()
-            already_off = True
-            if interrupted:
-                break
+            already_off = False
         else:
             _ensure_off(hw_mode)
             already_off = True
-            if _sleep_until(seg_end, on_tick=publish_segment_progress):
-                break
+        if _sleep_until(seg_end, on_tick=publish_segment_progress):
+            break
     if not already_off:
-        _ensure_off(hw_mode)
+        _ensure_all_off()
     elapsed = min(total_target, max(0.0, _now() - start))
+    if not (_stop_event.is_set() or _abort_event.is_set()):
+        elapsed = float(total_target)
     _update_progress(
         phase="off",
         elapsed_sec=elapsed,
@@ -243,7 +223,7 @@ def _run_worker(program: Dict[str, Any]) -> None:
             "programDone": bool(state.get("programDone")),
         }
     except Exception as e:
-        _ensure_off(_hw_mode_for_shaker(program.get("shakerMode")))
+        _ensure_all_off()
         hardware_service.stop_shaker_live_state()
         _run_result = {"ok": False, "error": str(e)}
     finally:
@@ -276,6 +256,7 @@ def abort_program() -> Dict[str, Any]:
     state = hardware_service.get_live_state()
     hw_mode = str(state.get("mode") or "C")
     hardware_service.cmd_shaker_stop(hw_mode)
+    hardware_service.ensure_shaker_stopped()
     hardware_service.stop_shaker_live_state()
     return {"ok": True, "aborted": True}
 

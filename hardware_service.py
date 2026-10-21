@@ -47,8 +47,10 @@ SHAKER_AMPLITUDE_MIN = 5
 SHAKER_AMPLITUDE_MAX = 30
 # Firmware replies OK only on a zero frame. Keep sending that frame until OK,
 # unless a newer start has taken the line.
-SHAKER_STOP_ATTEMPTS = 15
-SHAKER_STOP_ACK_TIMEOUT = 1.5
+# One frame cuts load immediately; OK can take ~2s on mode I. Avoid long retry loops
+# that keep the UI/report ahead of the motor still running.
+SHAKER_STOP_ATTEMPTS = 3
+SHAKER_STOP_ACK_TIMEOUT = 2.0
 _live_state = {
     "running": False,
     "amplitude": None,
@@ -1365,8 +1367,8 @@ def cmd_shaker_stop(mode: str = "C", epoch: Optional[int] = None) -> Dict[str, A
 
 def ensure_shaker_stopped() -> Dict[str, Any]:
     """Stop both firmware modes, retrying each until OK. A new start cancels the rest."""
-    if not _ensure_stop_lock.acquire(blocking=False):
-        return {"ok": True, "skipped": True}
+    if not _ensure_stop_lock.acquire(timeout=20.0):
+        return {"ok": False, "error": "stop lock timeout"}
     try:
         epoch = _shaker_epoch_value()
         results: Dict[str, Any] = {}

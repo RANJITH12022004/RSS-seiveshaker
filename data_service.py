@@ -564,7 +564,7 @@ def save_report(report_data: Dict[str, Any]) -> int:
             break
     if not found:
         reports.append(report_data)
-    _save_json_file(reports_path, reports)
+    _save_json_file_durable(reports_path, reports)
     return report_id
 
 
@@ -820,8 +820,8 @@ def _compute_password_cycle_state(
     """
     Rolling password-expiry cycles anchored to installation date.
 
-    First enforcement boundary: installationDate + periodDays + 1 day
-    (e.g. install 01-03 with 30 days => enforce from 01-04).
+    First enforcement boundary: installationDate + periodDays
+    (e.g. install 01-03 with 1 day => enforce from 01-04).
     Later boundaries: every periodDays after that first boundary.
     Expired when passwordLastChangedAt is before the current cycle start.
     """
@@ -839,7 +839,7 @@ def _compute_password_cycle_state(
     plc_day = datetime(plc_dt.year, plc_dt.month, plc_dt.day)
 
     if now_day < anchor_day:
-        first = anchor_day + timedelta(days=period_days + 1)
+        first = anchor_day + timedelta(days=period_days)
         return {
             "expired": False,
             "reason": "before-anchor",
@@ -851,7 +851,7 @@ def _compute_password_cycle_state(
             "cycleIndex": 0,
         }
 
-    first_boundary = anchor_day + timedelta(days=period_days + 1)
+    first_boundary = anchor_day + timedelta(days=period_days)
     if now_day < first_boundary:
         return {
             "expired": False,
@@ -884,7 +884,7 @@ def _compute_password_cycle_state(
 def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Compute password expiry status for a non-factory member.
-    Global rolling cycles: installationDate + N * periodDays (first boundary at +period+1).
+    Global rolling cycles: installationDate + N * periodDays (first boundary at +periodDays).
     """
     policy = get_password_policy_for_members()
     if not policy.get("enabled"):
@@ -1366,7 +1366,7 @@ def save_current_user(user: Dict[str, Any]):
     global _current_user
     _current_user = dict(user)
     session_path = _get_storage_path("current_user.json")
-    _save_json_file(session_path, _current_user)
+    _save_json_file_durable(session_path, _current_user)
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
@@ -1426,7 +1426,7 @@ def write_session_power_audit_pending(user: Dict[str, Any]):
         "role": (user.get("role") or "").strip(),
         "ts_ms": int(datetime.now().timestamp() * 1000),
     }
-    _save_json_file(path, payload)
+    _save_json_file_durable(path, payload)
 
 
 def read_session_power_audit_pending() -> Optional[Dict[str, Any]]:

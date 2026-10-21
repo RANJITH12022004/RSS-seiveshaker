@@ -90,6 +90,49 @@ def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _report_was_aborted(td: Optional[Dict[str, Any]], report: Optional[Dict[str, Any]] = None) -> bool:
+    t = td if isinstance(td, dict) else {}
+    r = report if isinstance(report, dict) else {}
+    status = str(t.get("status") or r.get("status") or "").strip().lower()
+    return status == "aborted" or bool(t.get("aborted")) or bool(t.get("completedEarly"))
+
+
+def _int_seconds(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_duration_seconds(td: Optional[Dict[str, Any]], recipe: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    t = td if isinstance(td, dict) else {}
+    rec = recipe if isinstance(recipe, dict) else {}
+    for val in (t.get("setDurationSeconds"), rec.get("durationSeconds"), t.get("durationSeconds")):
+        sec = _int_seconds(val)
+        if sec is not None:
+            return sec
+    return None
+
+
+def logged_run_duration_seconds(
+    td: Optional[Dict[str, Any]],
+    recipe: Optional[Dict[str, Any]] = None,
+    report: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """Duration printed on reports: the set time unless the run was aborted or completed early."""
+    set_dur = _set_duration_seconds(td, recipe)
+    if not _report_was_aborted(td, report) and set_dur is not None:
+        return set_dur
+    t = td if isinstance(td, dict) else {}
+    for val in (t.get("actualElapsedSeconds"), t.get("elapsedSeconds"), set_dur):
+        sec = _int_seconds(val)
+        if sec is not None:
+            return sec
+    return None
+
+
 def format_duration_hhmmss(seconds_val: Any) -> str:
     """Format elapsed seconds as HH:MM:SS for reports."""
     if seconds_val is None:
@@ -397,17 +440,10 @@ def build_test_report_derived(
 
     shaker_mode = td.get("shakerMode") or recipe.get("shakerMode") or "CONTINUOUS"
     amplitude = td.get("amplitude") if td.get("amplitude") is not None else recipe.get("amplitude")
-    duration_sec = td.get("actualElapsedSeconds")
-    if duration_sec is None:
-        duration_sec = td.get("elapsedSeconds")
-    if duration_sec is None:
-        duration_sec = td.get("durationSeconds") or recipe.get("durationSeconds")
+    set_dur = _set_duration_seconds(td, recipe)
+    duration_sec = logged_run_duration_seconds(td, recipe)
     if duration_sec is None:
         duration_sec = test_duration_seconds(td)
-
-    set_dur = td.get("setDurationSeconds")
-    if set_dur is None:
-        set_dur = recipe.get("durationSeconds") or td.get("durationSeconds")
 
     test_no = "--"
     if report_id is not None:
@@ -452,7 +488,7 @@ def compute_test_report_statistics(test_data: Optional[Dict[str, Any]]) -> Optio
     mode = test_data.get("shakerMode")
     if mode:
         stats["Shaker mode"] = {"value": str(mode)}
-    dur = test_data.get("actualElapsedSeconds") or test_data.get("durationSeconds")
+    dur = logged_run_duration_seconds(test_data, test_data)
     if dur is not None:
         try:
             stats["Duration (s)"] = {"value": int(float(dur))}
@@ -840,27 +876,11 @@ def build_sieve_shaker_validation_shared_lines(
         or "--"
     )
 
-    set_dur = td.get("setDurationSeconds")
-    if set_dur is None:
-        set_dur = recipe.get("durationSeconds") or td.get("durationSeconds") or 0
+    set_dur = _set_duration_seconds(td, recipe) or 0
     set_dur_str = _mmss_from_seconds(set_dur)
-
-    test_dur = td.get("actualElapsedSeconds")
-    if test_dur is None:
-        test_dur = td.get("elapsedSeconds")
+    test_dur = logged_run_duration_seconds(td, recipe, r)
     if test_dur is None:
         test_dur = 0
-        try:
-            from datetime import datetime as _dt
-            s_raw = td.get("validationStartTime") or td.get("testStartTime") or r.get("createdAt") or ""
-            e_raw = td.get("validationEndTime") or td.get("testEndTime") or r.get("completedAt") or ""
-            if s_raw and e_raw:
-                sdt = _dt.fromisoformat(str(s_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                edt = _dt.fromisoformat(str(e_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                if edt >= sdt:
-                    test_dur = int((edt - sdt).total_seconds())
-        except Exception:
-            test_dur = 0
     test_dur_str = _mmss_from_seconds(test_dur)
 
     ts_start = (
@@ -992,31 +1012,15 @@ def build_sieve_shaker_shared_lines(
     except (TypeError, ValueError):
         duration_str = "n/a"
 
-    set_dur = td.get("setDurationSeconds")
-    if set_dur is None:
-        set_dur = recipe.get("durationSeconds") or td.get("durationSeconds") or 0
+    set_dur = _set_duration_seconds(td, recipe) or 0
     try:
         set_dur_str = f"{int(set_dur)//60:02d}:{int(set_dur)%60:02d}" if set_dur else "n/a"
     except (TypeError, ValueError):
         set_dur_str = "n/a"
 
-    test_dur = td.get("actualElapsedSeconds")
+    test_dur = logged_run_duration_seconds(td, recipe, r)
     if test_dur is None:
-        test_dur = td.get("elapsedSeconds")
-    if test_dur is None:
-        # wall start→end fallback
         test_dur = 0
-        try:
-            from datetime import datetime as _dt
-            s_raw = td.get("testStartTime") or r.get("createdAt") or ""
-            e_raw = td.get("testEndTime") or r.get("completedAt") or ""
-            if s_raw and e_raw:
-                sdt = _dt.fromisoformat(str(s_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                edt = _dt.fromisoformat(str(e_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                if edt >= sdt:
-                    test_dur = int((edt - sdt).total_seconds())
-        except Exception:
-            test_dur = 0
     try:
         test_dur_str = f"{int(test_dur)//60:02d}:{int(test_dur)%60:02d}" if test_dur is not None and test_dur != "" else "n/a"
     except (TypeError, ValueError):
@@ -1447,9 +1451,9 @@ def build_sieve_shaker_validation_report_html(report: Dict[str, Any]) -> str:
     test_status = esc(status_raw.title() if status_raw else "--")
     remarks = esc(str(td.get("remarks") or r.get("remarks") or ""))
 
-    duration_sec = int(td.get("setDurationSeconds") or recipe.get("durationSeconds") or td.get("durationSeconds") or 0)
+    duration_sec = int(_set_duration_seconds(td, recipe) or 0)
     duration_str = f"{duration_sec // 60:02d}:{duration_sec % 60:02d}" if duration_sec else "--"
-    elapsed_sec = int(td.get("actualElapsedSeconds") or td.get("elapsedSeconds") or 0)
+    elapsed_sec = int(logged_run_duration_seconds(td, recipe, r) or 0)
     elapsed_str = f"{elapsed_sec // 60:02d}:{elapsed_sec % 60:02d}" if elapsed_sec else "--"
 
     ts_start = td.get("validationStartTime") or td.get("testStartTime") or r.get("createdAt") or ""
@@ -1590,9 +1594,9 @@ def build_sieve_shaker_report_html(report: Dict[str, Any]) -> str:
     amplitude_raw = recipe.get("amplitude") or td.get("amplitude")
     amp_display = _fmt_amp_display(amplitude_raw)
 
-    duration_sec = int(td.get("setDurationSeconds") or recipe.get("durationSeconds") or td.get("durationSeconds") or 0)
+    duration_sec = int(_set_duration_seconds(td, recipe) or 0)
     duration_str = f"{duration_sec // 60:02d}:{duration_sec % 60:02d}" if duration_sec else "--"
-    elapsed_sec  = int(td.get("actualElapsedSeconds") or td.get("elapsedSeconds") or 0)
+    elapsed_sec  = int(logged_run_duration_seconds(td, recipe, r) or 0)
     elapsed_str  = f"{elapsed_sec // 60:02d}:{elapsed_sec % 60:02d}" if elapsed_sec else "--"
     shaker_mode  = esc(str(recipe.get("shakerMode") or td.get("shakerMode") or "--"))
     weigh_method = esc(str(td.get("weighMethod") or recipe.get("weighMethod") or "--").title())

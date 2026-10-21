@@ -734,6 +734,43 @@ def _persist_power_loss_aborted_report(report: dict) -> dict:
     return _persist_unclean_shutdown_aborted_report(report)
 
 
+def _log_system_power_audit(action: str, details: str, extra=None) -> None:
+    """Power-loss rows use actor '--' so factory-session suppression cannot drop them."""
+    audit_time = _audit_time_fields()
+    audit_service.log_structured_event(
+        user="--",
+        role="--",
+        action=action,
+        details=details,
+        event_type="compliance",
+        entity_type="session" if "logout" in str(action).lower() else "report",
+        outcome="success",
+        reason=POWER_INTERRUPTION_REMARKS,
+        extra=extra,
+        request_source="system/startup",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+    )
+
+
+def _checkpoint_operator_user(cp) -> Optional[dict]:
+    if not isinstance(cp, dict) or not cp:
+        return None
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    username = str(
+        cp.get("operatedByUsername")
+        or td.get("operatedByUsername")
+        or cp.get("employeeId")
+        or td.get("testedBy")
+        or ""
+    ).strip()
+    name = str(cp.get("operatorName") or td.get("operatorName") or username).strip()
+    role = str(cp.get("operatorRole") or td.get("operatorRole") or "").strip()
+    if not username and not name:
+        return None
+    return {"username": username or name, "name": name or username, "role": role}
+
+
 def _audit_power_interruption_report(report: dict) -> None:
     """Compliance audit row for a test/validation report closed after power loss."""
     rid = report.get("id")
@@ -763,7 +800,7 @@ def _audit_power_interruption_report(report: dict) -> None:
         "{} aborted due to power interruption while {} was performing | {} | "
         "report id {} | Test Duration {}s | Set Duration {}s | status: Aborted | approved by System"
     ).format(kind, operator, ctx, rid, test_dur, set_dur)
-    _audit(None, None, "Power interruption", detail)
+    _log_system_power_audit("Power interruption", detail)
 
 
 def _audit_unclean_shutdown_aborted_report(report: dict) -> None:
@@ -871,17 +908,14 @@ def _startup_session_power_audit():
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
+        checkpoint = data_service.get_test_run_data()
+        checkpoint_user = _checkpoint_operator_user(checkpoint)
         checkpoint_recoverable = _has_recoverable_test_run_checkpoint()
         # In-progress checkpoints always finalize — a leftover clean-stop flag (or SIGTERM
         # that precedes hard power loss) must not drop a live test/validation report.
         should_finalize_checkpoint = checkpoint_recoverable
         # Pending-approval reports stay pending across intentional clean restarts.
         should_finalize_pending = not had_clean_shutdown
-        should_log_power_logout = (
-            bool(pending)
-            and not pending.get("powerAuditLogged")
-            and (should_finalize_checkpoint or should_finalize_pending)
-        )
         if should_finalize_checkpoint or should_finalize_pending:
             try:
                 n_pending = 0
@@ -901,34 +935,31 @@ def _startup_session_power_audit():
                 )
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
-            if should_log_power_logout:
-                un = (pending.get("username") or "").strip()
-                role = (pending.get("role") or "").strip()
-                audit_time = _audit_time_fields()
+            logout_user = None
+            if pending and (pending.get("username") or pending.get("name")):
+                logout_user = pending
+            else:
+                logout_user = checkpoint_user or data_service.get_current_user()
+            already = bool(isinstance(pending, dict) and pending.get("powerAuditLogged"))
+            if logout_user and not already:
+                un = str((logout_user or {}).get("username") or (logout_user or {}).get("name") or "").strip()
+                role = str((logout_user or {}).get("role") or "").strip()
                 if audit_service.is_hidden_factory_actor(un, role):
                     pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
                 elif un:
                     pi_details = "Unclean shutdown while {} was logged in".format(un)
                 else:
-                    pi_details = "Unclean shutdown during active session"
-                audit_service.log_structured_event(
-                    user="--",
-                    role="--",
-                    action="Power interruption logout",
-                    outcome="success",
-                    entity_type="session",
-                    entity_name="power",
-                    details=pi_details,
-                    event_type="compliance",
-                    target_user=un,
-                    extra={"lastKnownRole": role} if role else None,
-                    request_source="system/startup",
-                    timestamp_ms=audit_time.get("timestamp_ms"),
-                    date_time=audit_time.get("date_time"),
+                    pi_details = "Unclean shutdown during an active session"
+                _log_system_power_audit(
+                    "Power interruption logout",
+                    pi_details,
+                    extra={"lastKnownRole": role, "targetUser": un} if (role or un) else None,
                 )
-                pending = dict(pending)
-                pending["powerAuditLogged"] = True
-                data_service.write_session_power_audit_pending(pending)
+                if pending:
+                    pending = dict(pending)
+                    pending["powerAuditLogged"] = True
+                    data_service.write_session_power_audit_pending(pending)
+            _ensure_shaker_stopped_safe()
         elif pending and had_clean_shutdown and pending.get("powerAuditLogged"):
             pending = dict(pending)
             pending.pop("powerAuditLogged", None)
@@ -2112,7 +2143,12 @@ def put_test_run_checkpoint():
         if rtype not in ("test", "validation"):
             return jsonify({"ok": False, "error": "Checkpoint type must be test or validation"}), 400
         body["_checkpointSavedAt"] = _utc_now_iso()
-        if not data_service.get_current_user():
+        user = data_service.get_current_user() or {}
+        if user:
+            body.setdefault("operatedByUsername", user.get("username") or user.get("name"))
+            body.setdefault("operatorName", user.get("name") or user.get("username"))
+            body.setdefault("operatorRole", user.get("role"))
+        elif not data_service.get_current_user():
             app.logger.warning(
                 "Checkpoint saved without persisted session file (header session restore may apply)"
             )
@@ -3358,6 +3394,24 @@ def login_biometric():
                 }
             ), 403
 
+        expiry = data_service.get_member_password_expiry_state(member)
+        if bool(expiry.get("expired")):
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details="Password expired - reset required",
+                target_user=username,
+                extra={"templateId": template_id, "passwordExpiry": expiry},
+            )
+            return jsonify({
+                "error": "Password expired. Reset required.",
+                "passwordExpired": True,
+                "username": username,
+                "expiry": expiry,
+            }), 403
+
         user = dict(member)
         user.pop("password", None)
         user.pop("creationPasswordSalt", None)
@@ -3473,22 +3527,18 @@ def logout():
 
 @app.route("/api/data/auth/session-ui-reset", methods=["POST"])
 def session_ui_reset():
-    """Clear persisted kiosk session when the browser loads or refreshes.
+    """Chromium load/refresh. This is not a power cut.
 
-    If a user was still logged in on the bridge, record Logout (power interruption)
-    so audit trails do not show the prior session as still active after re-login.
+    Power-interruption logout and auto-aborted reports are owned by
+    `_startup_session_power_audit`. Clearing the session here while a live
+    checkpoint exists would 401 later checkpoint PUTs and drop recovery.
     """
     try:
-        user = data_service.get_current_user()
-        if user:
-            _audit_session_logout(
-                user,
-                "power_interruption",
-                request_source="POST /api/data/auth/session-ui-reset",
-            )
+        if _has_recoverable_test_run_checkpoint():
+            return jsonify({"success": True, "keptSession": True, "activeRun": True}), 200
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
-        return jsonify({"success": True}), 200
+        return jsonify({"success": True, "keptSession": False}), 200
     except Exception as e:
         app.logger.exception("Error during session UI reset")
         return jsonify({"error": str(e)}), 500

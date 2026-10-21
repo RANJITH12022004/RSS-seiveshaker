@@ -351,7 +351,7 @@ function canPerformAction(roleOrUser, featureKey, action) {
 }
 
 function checkNavigationAccess(screenId) {
-  if (screenId === 'login') return true;
+  if (screenId === 'login' || screenId === 'password-expired-reset') return true;
   var userObj = (typeof window !== 'undefined' && window.currentUser) ? window.currentUser : null;
   var role = getCurrentRole();
   if (!role && !userObj) return false;
