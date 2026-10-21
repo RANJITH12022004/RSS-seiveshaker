@@ -1677,6 +1677,61 @@ def _payload_has_protected_feature_overrides(member_data):
     return False
 
 
+def _session_recipe_actor():
+    cur = data_service.get_current_user() or {}
+    username = _norm_username(
+        (request.headers.get("X-User-Username") or "").strip()
+        or cur.get("username")
+        or cur.get("name")
+    )
+    name = (
+        (request.headers.get("X-User-Name") or "").strip()
+        or (cur.get("name") or "").strip()
+        or (cur.get("username") or "").strip()
+        or username
+    )
+    return username, name
+
+
+def _stamp_recipe_actors(processed, existing=None):
+    """Record creator once and last editor on every save. Client cannot spoof creator."""
+    processed = processed if isinstance(processed, dict) else {}
+    existing = existing if isinstance(existing, dict) else {}
+    username, name = _session_recipe_actor()
+    created_user = _norm_username(existing.get("createdByUsername"))
+    created_name = str(existing.get("createdBy") or "").strip()
+    if not created_user:
+        created_user = username
+        created_name = name
+    processed["createdByUsername"] = created_user
+    processed["createdBy"] = created_name or created_user or "--"
+    if username:
+        processed["lastModifiedByUsername"] = username
+        processed["lastModifiedBy"] = name or username
+    elif existing.get("lastModifiedByUsername"):
+        processed["lastModifiedByUsername"] = _norm_username(existing.get("lastModifiedByUsername"))
+        processed["lastModifiedBy"] = str(existing.get("lastModifiedBy") or processed["lastModifiedByUsername"]).strip()
+    return processed
+
+
+def _recipe_actor_usernames(recipe) -> set:
+    r = recipe if isinstance(recipe, dict) else {}
+    names = {
+        _norm_username(r.get("createdByUsername")),
+        _norm_username(r.get("lastModifiedByUsername")),
+    }
+    names.discard("")
+    return names
+
+
+def _recipe_self_approval_blocked(recipe, verified_username) -> bool:
+    """True when the verifier is the recipe creator or last editor."""
+    v = _norm_username(verified_username)
+    if not v:
+        return True
+    return v in _recipe_actor_usernames(recipe)
+
+
 def _apply_recipe_approval_for_session_creator(processed):
     """Factory saves: approve immediately (no QA/Admin verification). Others: pending."""
     if _effective_request_role() != "factory":
@@ -1724,6 +1779,8 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
+    if _recipe_self_approval_blocked(processed, verified_username):
+        return "Creator cannot approve their own recipe.", False
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
@@ -1905,6 +1962,7 @@ def create_recipe():
         if not validation_result.get("valid", False):
             return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
         processed = calculation_service.process_recipe_form_data(recipe_data)
+        _stamp_recipe_actors(processed)
         _apply_recipe_approval_for_session_creator(processed)
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
@@ -1977,12 +2035,13 @@ def update_recipe(recipe_id):
         if not validation_result.get("valid", False):
             return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
         processed = calculation_service.process_recipe_form_data(recipe_data)
+        before_recipe = data_service.get_recipe(recipe_id) or {}
+        _stamp_recipe_actors(processed, existing=before_recipe)
         _apply_recipe_approval_for_session_creator(processed)
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             return jsonify({"error": tok_err}), 401
-        before_recipe = data_service.get_recipe(recipe_id) or {}
         data_service.save_recipe(processed)
         rd = _recipe_edited_audit_detail(before_recipe, processed, recipe_id)
         _audit(None, None, "Recipe edited", rd)
@@ -2088,6 +2147,8 @@ def approve_recipe(recipe_id):
             return jsonify({"ok": False, "error": "Invalid approval state"}), 400
         if st is None:
             return jsonify({"ok": False, "error": "Legacy recipe does not require approval"}), 400
+        if _recipe_self_approval_blocked(recipe, verified_username):
+            return jsonify({"ok": False, "error": "Creator cannot approve their own recipe."}), 403
         verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
         verified_role = (verified.get("role") or role_header or "").strip()
         by_line = verified_name

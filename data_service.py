@@ -355,12 +355,39 @@ def _save_json_file_durable(filepath: pathlib.Path, data):
 # =================== RECIPE OPERATIONS ==========================
 
 
+def _norm_recipe_id(recipe_id) -> Optional[int]:
+    if recipe_id is None:
+        return None
+    try:
+        n = int(recipe_id)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _dedupe_recipes_by_id(recipes) -> list:
+    """Keep one row per recipe id (last write wins). Duplicate ids are a save/list bug."""
+    if not isinstance(recipes, list):
+        return []
+    by_id = {}
+    no_id = []
+    for recipe in recipes:
+        if not isinstance(recipe, dict):
+            continue
+        rid = _norm_recipe_id(recipe.get("id"))
+        if rid is None:
+            no_id.append(recipe)
+            continue
+        row = dict(recipe)
+        row["id"] = rid
+        by_id[rid] = row
+    return list(by_id.values()) + no_id
+
+
 def list_recipes(filter_type=None):
     """List all recipes, optionally filtered by type."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = _load_json_file(recipes_path, default=[])
-    if not isinstance(recipes, list):
-        recipes = []
+    recipes = _dedupe_recipes_by_id(_load_json_file(recipes_path, default=[]))
     if filter_type:
         recipes = [r for r in recipes if r.get("type") == filter_type]
     return recipes
@@ -378,20 +405,10 @@ def get_recipe(recipe_id: int):
     return None
 
 
-def _norm_recipe_id(recipe_id) -> Optional[int]:
-    if recipe_id is None:
-        return None
-    try:
-        n = int(recipe_id)
-        return n if n > 0 else None
-    except (TypeError, ValueError):
-        return None
-
-
 def save_recipe(recipe_data: Dict[str, Any]) -> int:
     """Save recipe (create or update). Enforces maxRecipes from factory settings."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes()
+    recipes = _dedupe_recipes_by_id(list_recipes())
     recipe_id = _norm_recipe_id(recipe_data.get("id"))
     if recipe_id is not None:
         recipe_data["id"] = recipe_id

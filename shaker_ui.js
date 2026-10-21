@@ -588,11 +588,10 @@
             window.currentEditingRecipeId = null;
             if (typeof recipeListMode !== 'undefined') recipeListMode = 'manage';
             goToPage('manage-recipes');
-            if (typeof loadManageRecipes === 'function') loadManageRecipes();
             var rid = (result && result.id != null) ? result.id : ((result && result.recipe && result.recipe.id != null) ? result.recipe.id : null);
             if (rid != null) {
                 setTimeout(function () {
-                    approveSavedRecipeWithCredentials(rid, 'Save Recipe', '').then(function (res) {
+                    approveSavedRecipeWithCredentials(rid, 'Save Recipe', '', result && result.recipe).then(function (res) {
                         if (res && res.cancelled) {
                             showAppModal('Recipe saved. It stays pending until a QA or Admin approves it.', 'Save Recipe');
                         }

@@ -26,6 +26,36 @@ def _utc_now_iso(kiosk):
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _stamp_recipe_actors_desktop(user, processed, existing=None):
+    processed = processed if isinstance(processed, dict) else {}
+    existing = existing if isinstance(existing, dict) else {}
+    username = _norm_username((user or {}).get("username") or (user or {}).get("name"))
+    name = str((user or {}).get("name") or (user or {}).get("username") or username or "").strip()
+    created_user = _norm_username(existing.get("createdByUsername"))
+    created_name = str(existing.get("createdBy") or "").strip()
+    if not created_user:
+        created_user = username
+        created_name = name
+    processed["createdByUsername"] = created_user
+    processed["createdBy"] = created_name or created_user or "--"
+    if username:
+        processed["lastModifiedByUsername"] = username
+        processed["lastModifiedBy"] = name or username
+    return processed
+
+
+def _recipe_self_approval_blocked(recipe, verified_username) -> bool:
+    v = _norm_username(verified_username)
+    if not v:
+        return True
+    names = {
+        _norm_username((recipe or {}).get("createdByUsername")),
+        _norm_username((recipe or {}).get("lastModifiedByUsername")),
+    }
+    names.discard("")
+    return v in names
+
+
 def _apply_recipe_approval_for_desktop_creator(user, processed, kiosk):
     role = str((user or {}).get("role") or "").strip().lower()
     if role != "factory":
@@ -63,6 +93,8 @@ def _apply_recipe_approval_verify_token(processed, remarks, kiosk):
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
+    if _recipe_self_approval_blocked(processed, verified_username):
+        return "Creator cannot approve their own recipe.", False
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, display_role_label(verified_role))
@@ -100,6 +132,7 @@ def register_recipes_routes(bp, kiosk):
             if not validation_result.get("valid", False):
                 return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
             processed = calculation_service.process_recipe_form_data(recipe_data)
+            _stamp_recipe_actors_desktop(user, processed)
             _apply_recipe_approval_for_desktop_creator(user, processed, kiosk)
             remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
             tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
@@ -148,6 +181,7 @@ def register_recipes_routes(bp, kiosk):
             if not validation_result.get("valid", False):
                 return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
             processed = calculation_service.process_recipe_form_data(recipe_data)
+            _stamp_recipe_actors_desktop(user, processed, existing=before_recipe)
             _apply_recipe_approval_for_desktop_creator(user, processed, kiosk)
             remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
             tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
@@ -234,6 +268,8 @@ def register_recipes_routes(bp, kiosk):
                 return jsonify({"ok": False, "error": "Invalid approval state"}), 400
             if st is None:
                 return jsonify({"ok": False, "error": "Legacy recipe does not require approval"}), 400
+            if _recipe_self_approval_blocked(recipe, verified_username):
+                return jsonify({"ok": False, "error": "Creator cannot approve their own recipe."}), 403
             verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
             verified_role = (verified.get("role") or "").strip()
             by_line = verified_name

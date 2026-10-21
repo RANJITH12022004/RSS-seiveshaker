@@ -695,6 +695,24 @@ function submitApprovalVerifyModal() {
             return;
         }
     }
+    if (_approvalVerifyPurpose === 'recipe') {
+        var blocked = window._recipeSelfApproveUsernames || [];
+        var typed = username.toLowerCase();
+        var isBlocked = false;
+        for (var bi = 0; bi < blocked.length; bi++) {
+            if (String(blocked[bi] || '').toLowerCase() === typed) {
+                isBlocked = true;
+                break;
+            }
+        }
+        if (isBlocked) {
+            if (errEl) {
+                errEl.textContent = 'Creator cannot approve their own recipe. Enter a different verifier.';
+                errEl.style.display = 'block';
+            }
+            return;
+        }
+    }
     apiRequest(API_BASE + '/api/data/auth/approval-verify', {
         method: 'POST',
         body: { method: 'credentials', username: username, password: password, purpose: _approvalVerifyPurpose }
@@ -1473,11 +1491,16 @@ function finishTestRunReportSaved(reportId) {
 /** Recipe approval modal copy; server allows QA only when QA exists, else Admin only. */
 function _approvalVerifyModalOptionsForRecipe() {
     var hasQa = typeof window._activeQaCount === 'number' && window._activeQaCount >= 1;
-    if (hasQa) return { purpose: 'recipe' };
+    if (hasQa) {
+        return {
+            purpose: 'recipe',
+            subtitleText: 'A different user must verify. The creator cannot approve their own recipe.'
+        };
+    }
     return {
         purpose: 'recipe',
         titleText: 'Admin approval required',
-        subtitleText: 'No active QA users. An admin must verify to continue.',
+        subtitleText: 'No active QA users. An admin other than the creator must verify.',
         usernameLabelText: 'Admin username',
         usernamePlaceholder: 'Enter admin username',
         emptyCredentialsMessage: 'Enter admin username and password.'
@@ -4323,11 +4346,10 @@ function saveRecipeFromParams() {
         window.currentEditingRecipeId = null;
         recipeListMode = 'manage';
         goToPage('manage-recipes');
-        if (typeof loadManageRecipes === 'function') loadManageRecipes();
         var rid = (result && result.id != null) ? result.id : ((result && result.recipe && result.recipe.id != null) ? result.recipe.id : null);
         if (rid != null) {
             setTimeout(function () {
-                approveSavedRecipeWithCredentials(rid, 'Save Recipe', '').then(function (res) {
+                approveSavedRecipeWithCredentials(rid, 'Save Recipe', '', result && result.recipe).then(function (res) {
                     if (res && res.cancelled) {
                         showAppModal('Recipe saved. It stays pending until a QA or Admin approves it.', 'Save Recipe');
                     }
@@ -7902,8 +7924,23 @@ function confirmRecipeAction(action) {
     // Load is only available from home → Load Recipe (recipeListMode === 'load').
 }
 
+function _setRecipeSelfApproveBlocklist(recipe) {
+    var blocked = {};
+    function add(v) {
+        v = String(v || '').trim().toLowerCase();
+        if (v) blocked[v] = true;
+    }
+    if (recipe) {
+        add(recipe.createdByUsername);
+        add(recipe.lastModifiedByUsername);
+    }
+    window._recipeSelfApproveUsernames = Object.keys(blocked);
+}
+
 function openRecipeApproveModal(recipeId) {
     window._recipeApproveId = recipeId;
+    var recipe = lastDisplayedRecipes && lastDisplayedRecipes.find(function (r) { return r.id === recipeId; });
+    _setRecipeSelfApproveBlocklist(recipe);
     var ta = document.getElementById('recipe-approve-remarks');
     if (ta) ta.value = '';
     var overlay = document.getElementById('recipe-approve-overlay');
@@ -7922,6 +7959,8 @@ function submitRecipeApprove() {
     var ta = document.getElementById('recipe-approve-remarks');
     var remarks = ta ? ta.value.trim() : '';
     var name = (window.currentUser && (window.currentUser.name || window.currentUser.username)) ? (window.currentUser.name || window.currentUser.username) : '';
+    var recipe = lastDisplayedRecipes && lastDisplayedRecipes.find(function (r) { return r.id === id; });
+    _setRecipeSelfApproveBlocklist(recipe);
     refreshActiveQaCount().then(function () {
         return openApprovalVerifyModal(_approvalVerifyModalOptionsForRecipe()).then(function (token) {
             if (!token) return;
@@ -7945,7 +7984,7 @@ function submitRecipeApprove() {
 }
 
 /** Opens credential modal and approves recipe; resolves { ok }, { cancelled: true }, or { ok: false }. */
-function approveSavedRecipeWithCredentials(recipeId, modalTitle, remarks) {
+function approveSavedRecipeWithCredentials(recipeId, modalTitle, remarks, recipe) {
     var title = modalTitle || 'Recipes';
     var name = (window.currentUser && (window.currentUser.name || window.currentUser.username)) ? (window.currentUser.name || window.currentUser.username) : '';
     var remarksStr = remarks != null ? String(remarks).trim() : '';
@@ -7954,6 +7993,13 @@ function approveSavedRecipeWithCredentials(recipeId, modalTitle, remarks) {
         showAppModal('Invalid recipe id for approval.', title);
         return Promise.resolve({ ok: false });
     }
+    if (!recipe && lastDisplayedRecipes) {
+        recipe = lastDisplayedRecipes.find(function (r) { return r.id === rid; });
+    }
+    _setRecipeSelfApproveBlocklist(recipe || {
+        createdByUsername: window.currentUser && window.currentUser.username,
+        lastModifiedByUsername: window.currentUser && window.currentUser.username
+    });
     return refreshActiveQaCount().then(function () {
         return openApprovalVerifyModal(_approvalVerifyModalOptionsForRecipe()).then(function (token) {
             if (!token) return { cancelled: true };
@@ -8285,18 +8331,36 @@ function getRecipes() {
     return apiRequest(API_BASE + '/api/data/recipes', {
         method: 'GET'
     }).then(function (data) {
-        return (data && data.recipes) ? data.recipes : [];
+        return _dedupeRecipesById((data && data.recipes) ? data.recipes : []);
     }).catch(function (err) {
         console.error('Failed to fetch recipes:', err);
         return [];
     });
 }
 
+function _dedupeRecipesById(recipes) {
+    var seen = {};
+    var out = [];
+    (recipes || []).forEach(function (r) {
+        if (!r) return;
+        var id = r.id != null ? String(r.id) : '';
+        if (id) {
+            if (seen[id]) return;
+            seen[id] = true;
+        }
+        out.push(r);
+    });
+    return out;
+}
+
 function loadViewRecipes() {
     var tbody = document.getElementById('view-recipes-table-body');
     if (!tbody) return;
     tbody.innerHTML = '';
+    var seq = (window._viewRecipesLoadSeq || 0) + 1;
+    window._viewRecipesLoadSeq = seq;
     getRecipes().then(function (recipes) {
+        if (seq !== window._viewRecipesLoadSeq) return;
         if (!recipes.length) {
             var tr = document.createElement('tr');
             tr.innerHTML = '<td colspan="2">No recipes.</td>';
@@ -8383,10 +8447,13 @@ function loadManageRecipes() {
     var tbody = document.getElementById('manage-recipes-table-body');
     if (!tbody) return;
 
+    var seq = (window._manageRecipesLoadSeq || 0) + 1;
+    window._manageRecipesLoadSeq = seq;
     tbody.innerHTML = '';
     refreshActiveQaCount();
 
     getRecipes().then(function (recipes) {
+        if (seq !== window._manageRecipesLoadSeq) return;
         // Manage Recipe: Actions only. Load button appears only on home → Load Recipe list.
         var mode = recipeListMode === 'load' ? 'load' : 'manage';
         if (mode === 'manage') recipeListMode = 'manage';
