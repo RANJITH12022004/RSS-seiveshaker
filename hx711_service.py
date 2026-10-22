@@ -12,9 +12,9 @@ import os
 
 _logger = logging.getLogger(__name__)
 
-# GPIO pin numbers (BCM) — IO0 = DATA, IO1 = CLK
-DATA_PIN = 0   # IO0
-CLK_PIN  = 1   # IO1
+# GPIO pin numbers (BCM) — RSS-2B load cell: DATA=IO0, CLK=IO1
+DATA_PIN = 0
+CLK_PIN = 1
 
 GAIN_128 = 1   # Channel A, gain 128
 GAIN_64  = 3   # Channel A, gain 64
@@ -48,14 +48,32 @@ def _open_gpio():
         return False
 
 
+def _pulse_hx711_reset():
+    """Extra clock pulses so the ADC leaves power-down and starts converting."""
+    import lgpio
+    if _h is None:
+        return
+    try:
+        for _ in range(28):
+            lgpio.gpio_write(_h, CLK_PIN, 1)
+            time.sleep(0.000002)
+            lgpio.gpio_write(_h, CLK_PIN, 0)
+            time.sleep(0.000002)
+    except Exception:
+        pass
+
+
 def _read_raw_hx711(gain_pulses=GAIN_128):
     """Bit-bang read 24-bit signed value from HX711. Returns int or None on error."""
     import lgpio
     if _h is None:
         return None
 
-    # Wait for DATA to go LOW (DRDY) — up to 500 ms
-    deadline = time.monotonic() + 0.5
+    _pulse_hx711_reset()
+    time.sleep(0.05)
+
+    # Wait for DATA to go LOW (DRDY) — HX711 can take up to ~1 s when settling
+    deadline = time.monotonic() + 0.35
     while lgpio.gpio_read(_h, DATA_PIN) != 0:
         if time.monotonic() > deadline:
             _logger.debug("hx711_service: DRDY timeout")
@@ -85,12 +103,21 @@ def _read_raw_hx711(gain_pulses=GAIN_128):
 
 
 def init(app_or_config, config=None):
-    global _initialized, _config, _scale_factor, _tare_offset
+    global _initialized, _config, _scale_factor, _tare_offset, DATA_PIN, CLK_PIN
     if config is None:
         cfg = app_or_config or {}
     else:
         cfg = config
     _config = dict(cfg)
+    if str(os.environ.get("HX711_DISABLED", "0")).strip().lower() in ("1", "true", "yes", "on"):
+        _initialized = False
+        _logger.info("hx711_service: disabled via HX711_DISABLED")
+        return
+    try:
+        DATA_PIN = int(os.environ.get("HX711_DATA_PIN", _config.get("HX711_DATA_PIN", DATA_PIN)))
+        CLK_PIN = int(os.environ.get("HX711_CLK_PIN", _config.get("HX711_CLK_PIN", CLK_PIN)))
+    except (TypeError, ValueError):
+        pass
     _scale_factor = float(_config.get("HX711_SCALE_FACTOR", 1.0))
     _tare_offset = float(_config.get("HX711_TARE_OFFSET", 0.0))
     _initialized = _open_gpio()
@@ -122,7 +149,7 @@ def set_scale_factor(factor):
     _scale_factor = float(factor)
 
 
-def read_weight(samples=5):
+def read_weight(samples=2):
     """
     Read weight averaged over N samples.
     Returns dict: { ok: bool, weight: float (4dp), raw: int, unit: 'g' }
@@ -134,7 +161,7 @@ def read_weight(samples=5):
                 import random
                 sim = round(50.0 + random.uniform(-0.5, 0.5), 4)
                 return {"ok": True, "weight": sim, "raw": 0, "unit": "g", "simulated": True}
-            return {"ok": False, "weight": None, "raw": 0, "unit": "g", "simulated": True, "error": "Scale not ready"}
+            return {"ok": False, "weight": None, "raw": 0, "unit": "g", "error": "Scale not ready"}
 
         readings = []
         for _ in range(samples):
@@ -150,7 +177,7 @@ def read_weight(samples=5):
                 sim = round(50.0 + random.uniform(-0.5, 0.5), 4)
                 _logger.debug("hx711_service: HX711 not responding, returning simulated weight")
                 return {"ok": True, "weight": sim, "raw": 0, "unit": "g", "simulated": True, "warning": "HX711 DRDY timeout"}
-            return {"ok": False, "weight": None, "raw": 0, "unit": "g", "simulated": True, "error": "Scale not ready", "warning": "HX711 DRDY timeout"}
+            return {"ok": False, "weight": None, "raw": 0, "unit": "g", "error": "Scale not ready", "warning": "HX711 DRDY timeout"}
 
         avg_raw = sum(readings) / len(readings)
         _last_raw = avg_raw

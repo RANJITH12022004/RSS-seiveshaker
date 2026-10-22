@@ -357,6 +357,22 @@ def close_serial():
             _ser = None
 
 
+def reopen_serial() -> bool:
+    """Re-open R307 UART after a temporary release (e.g. shared scale on same port)."""
+    if not sensor_available():
+        return False
+    with _lock:
+        if _ser is not None and getattr(_ser, "is_open", False):
+            return True
+        try:
+            _open_serial()
+            return True
+        except Exception as exc:
+            if _logger:
+                _logger.warning("[BIOMETRIC] reopen_serial failed: %s", exc)
+            return False
+
+
 def clear_all_templates(max_attempts: int = 3) -> Dict[str, Any]:
     """Erase every fingerprint template from the sensor, with retry and fallback deletes."""
     if not sensor_available():

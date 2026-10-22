@@ -7884,7 +7884,8 @@ function startTestRun(recipe) {
     window.activeTestRecipe = recipe;
     lastTestRunRecipe = recipe;
     goToPage('test-run');
-    initTestRunPage(recipe);
+    var initFn = (typeof window.initTestRunPage === 'function') ? window.initTestRunPage : initTestRunPage;
+    initFn(recipe);
 }
 
 function openRecipeActionsModal(recipeId) {

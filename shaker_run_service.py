@@ -24,6 +24,18 @@ def _now() -> float:
     return time.time()
 
 
+# Measured on RSS-2B: intermittent stop OK ~1.78s, continuous ~1.88s after #00 frame.
+# Transmit stop this long before the displayed end so the motor is off when the timer finishes.
+SHAKER_STOP_LEAD_SEC = 1.8
+
+
+def _stop_lead(duration_sec: float) -> float:
+    duration = max(0.0, float(duration_sec))
+    if duration <= SHAKER_STOP_LEAD_SEC + 0.5:
+        return 0.0
+    return SHAKER_STOP_LEAD_SEC
+
+
 def _normalize_mode(mode: str) -> str:
     m = str(mode or "CONTINUOUS").strip().upper()
     if m in ("C", "CONTINUOUS"):
@@ -66,11 +78,6 @@ def _sleep_until(
 
 def _ensure_off(hw_mode: str) -> None:
     hardware_service.cmd_shaker_stop(hw_mode)
-
-
-def _ensure_all_off() -> None:
-    """Cut both C and I. Intermittent keeps running if only #00C or only #00I is sent."""
-    hardware_service.ensure_shaker_stopped()
 
 
 def _run_on(amplitude: int, hw_mode: str) -> dict:
@@ -116,14 +123,20 @@ def _run_continuous(program: Dict[str, Any]) -> None:
         )
 
     _run_on(amplitude, hw_mode)
-    interrupted = _sleep_until(start + duration, on_tick=publish_progress)
+    stop_at = start + duration
+    send_stop_at = stop_at - _stop_lead(duration)
+    interrupted = _sleep_until(send_stop_at, on_tick=publish_progress)
     stop_thread = None
     if interrupted:
-        _ensure_all_off()
-        elapsed = min(duration, max(0.0, _now() - start))
+        _ensure_off(hw_mode)
     else:
-        stop_thread = threading.Thread(target=_ensure_all_off, daemon=True)
+        stop_thread = threading.Thread(target=_ensure_off, args=(hw_mode,), daemon=True)
         stop_thread.start()
+        if _sleep_until(stop_at, on_tick=publish_progress):
+            interrupted = True
+        stop_thread.join()
+    elapsed = min(duration, max(0.0, _now() - start))
+    if not interrupted and not (_stop_event.is_set() or _abort_event.is_set()):
         elapsed = float(duration)
     _update_progress(
         phase="off",
@@ -133,8 +146,6 @@ def _run_continuous(program: Dict[str, Any]) -> None:
         program_done=True,
         completed_early=interrupted and not _abort_event.is_set(),
     )
-    if stop_thread is not None:
-        stop_thread.join()
 
 
 def _run_intermittent(program: Dict[str, Any]) -> None:
@@ -180,7 +191,7 @@ def _run_logical(program: Dict[str, Any]) -> None:
         if _sleep_until(seg_end, on_tick=publish_segment_progress):
             break
     if not already_off:
-        _ensure_all_off()
+        _ensure_off(hw_mode)
     elapsed = min(total_target, max(0.0, _now() - start))
     if not (_stop_event.is_set() or _abort_event.is_set()):
         elapsed = float(total_target)
@@ -223,7 +234,7 @@ def _run_worker(program: Dict[str, Any]) -> None:
             "programDone": bool(state.get("programDone")),
         }
     except Exception as e:
-        _ensure_all_off()
+        _ensure_off(_hw_mode_for_shaker(program.get("shakerMode")))
         hardware_service.stop_shaker_live_state()
         _run_result = {"ok": False, "error": str(e)}
     finally:
@@ -256,7 +267,6 @@ def abort_program() -> Dict[str, Any]:
     state = hardware_service.get_live_state()
     hw_mode = str(state.get("mode") or "C")
     hardware_service.cmd_shaker_stop(hw_mode)
-    hardware_service.ensure_shaker_stopped()
     hardware_service.stop_shaker_live_state()
     return {"ok": True, "aborted": True}
 

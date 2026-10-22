@@ -69,8 +69,15 @@ def init(config):
 def _db_connect():
     if not _audit_db_path:
         return None
-    conn = sqlite3.connect(str(_audit_db_path))
+    conn = sqlite3.connect(str(_audit_db_path), timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        # WAL + shm files are unsafe on VFAT; FULL sync survives a power cut.
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.execute("PRAGMA temp_store = MEMORY")
+    except sqlite3.Error:
+        pass
     return conn
 
 
@@ -811,9 +818,8 @@ def export_entries(filters: Optional[Dict[str, Any]] = None, path_or_fd=None):
         json.dump(entries, path_or_fd, indent=2, ensure_ascii=False)
     else:
         path = pathlib.Path(path_or_fd)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2, ensure_ascii=False)
+        import data_service as _data_service
+        _data_service._save_json_file(path, entries)
 
 
 AUDIT_EXPORT_SCHEDULE_FILE = "audit_export_schedule.json"
@@ -829,11 +835,11 @@ def _audit_export_schedule_path() -> Optional[pathlib.Path]:
 
 def _load_audit_export_schedule() -> Dict[str, Any]:
     path = _audit_export_schedule_path()
-    if not path or not path.is_file():
+    if not path:
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        import data_service as _data_service
+        data = _data_service._load_json_file(path, default={})
         if isinstance(data, dict):
             return data
         if isinstance(data, list):
@@ -898,9 +904,8 @@ def _save_audit_export_schedule(data: Dict[str, Any]) -> None:
     path = _audit_export_schedule_path()
     if not path:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    import data_service as _data_service
+    _data_service._save_json_file(path, data)
 
 
 def clear_audit_export_schedule() -> None:

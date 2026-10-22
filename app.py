@@ -6,6 +6,7 @@ Serves static files and REST API for data, auth, audit, reports, and print.
 
 import json
 import os
+import re
 import pathlib
 import secrets
 import atexit
@@ -127,12 +128,13 @@ print_service.init(config)
 hardware_service.init(app, config)
 
 scale_config = {
+    "SCALE_MODEL": os.environ.get("SCALE_MODEL", "").strip(),
     "SCALE_PORT": os.environ.get("SCALE_PORT", ""),
     "SCALE_BAUD": os.environ.get("SCALE_BAUD", "9600"),
     "SCALE_BYTESIZE": os.environ.get("SCALE_BYTESIZE", "8"),
     "SCALE_PARITY": os.environ.get("SCALE_PARITY", "N"),
     "SCALE_STOPBITS": os.environ.get("SCALE_STOPBITS", "1"),
-    "SCALE_READ_MODE": os.environ.get("SCALE_READ_MODE", "line"),
+    "SCALE_READ_MODE": os.environ.get("SCALE_READ_MODE", "frame"),
     "SCALE_FRAME_SIZE": os.environ.get("SCALE_FRAME_SIZE", "8"),
     "SCALE_UNIT_MULTIPLIER": os.environ.get("SCALE_UNIT_MULTIPLIER", "1"),
 }
@@ -734,43 +736,6 @@ def _persist_power_loss_aborted_report(report: dict) -> dict:
     return _persist_unclean_shutdown_aborted_report(report)
 
 
-def _log_system_power_audit(action: str, details: str, extra=None) -> None:
-    """Power-loss rows use actor '--' so factory-session suppression cannot drop them."""
-    audit_time = _audit_time_fields()
-    audit_service.log_structured_event(
-        user="--",
-        role="--",
-        action=action,
-        details=details,
-        event_type="compliance",
-        entity_type="session" if "logout" in str(action).lower() else "report",
-        outcome="success",
-        reason=POWER_INTERRUPTION_REMARKS,
-        extra=extra,
-        request_source="system/startup",
-        timestamp_ms=audit_time.get("timestamp_ms"),
-        date_time=audit_time.get("date_time"),
-    )
-
-
-def _checkpoint_operator_user(cp) -> Optional[dict]:
-    if not isinstance(cp, dict) or not cp:
-        return None
-    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
-    username = str(
-        cp.get("operatedByUsername")
-        or td.get("operatedByUsername")
-        or cp.get("employeeId")
-        or td.get("testedBy")
-        or ""
-    ).strip()
-    name = str(cp.get("operatorName") or td.get("operatorName") or username).strip()
-    role = str(cp.get("operatorRole") or td.get("operatorRole") or "").strip()
-    if not username and not name:
-        return None
-    return {"username": username or name, "name": name or username, "role": role}
-
-
 def _audit_power_interruption_report(report: dict) -> None:
     """Compliance audit row for a test/validation report closed after power loss."""
     rid = report.get("id")
@@ -800,7 +765,7 @@ def _audit_power_interruption_report(report: dict) -> None:
         "{} aborted due to power interruption while {} was performing | {} | "
         "report id {} | Test Duration {}s | Set Duration {}s | status: Aborted | approved by System"
     ).format(kind, operator, ctx, rid, test_dur, set_dur)
-    _log_system_power_audit("Power interruption", detail)
+    _audit(None, None, "Power interruption", detail)
 
 
 def _audit_unclean_shutdown_aborted_report(report: dict) -> None:
@@ -908,14 +873,17 @@ def _startup_session_power_audit():
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
-        checkpoint = data_service.get_test_run_data()
-        checkpoint_user = _checkpoint_operator_user(checkpoint)
         checkpoint_recoverable = _has_recoverable_test_run_checkpoint()
         # In-progress checkpoints always finalize — a leftover clean-stop flag (or SIGTERM
         # that precedes hard power loss) must not drop a live test/validation report.
         should_finalize_checkpoint = checkpoint_recoverable
         # Pending-approval reports stay pending across intentional clean restarts.
         should_finalize_pending = not had_clean_shutdown
+        should_log_power_logout = (
+            bool(pending)
+            and not pending.get("powerAuditLogged")
+            and (should_finalize_checkpoint or should_finalize_pending)
+        )
         if should_finalize_checkpoint or should_finalize_pending:
             try:
                 n_pending = 0
@@ -935,31 +903,34 @@ def _startup_session_power_audit():
                 )
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
-            logout_user = None
-            if pending and (pending.get("username") or pending.get("name")):
-                logout_user = pending
-            else:
-                logout_user = checkpoint_user or data_service.get_current_user()
-            already = bool(isinstance(pending, dict) and pending.get("powerAuditLogged"))
-            if logout_user and not already:
-                un = str((logout_user or {}).get("username") or (logout_user or {}).get("name") or "").strip()
-                role = str((logout_user or {}).get("role") or "").strip()
+            if should_log_power_logout:
+                un = (pending.get("username") or "").strip()
+                role = (pending.get("role") or "").strip()
+                audit_time = _audit_time_fields()
                 if audit_service.is_hidden_factory_actor(un, role):
                     pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
                 elif un:
                     pi_details = "Unclean shutdown while {} was logged in".format(un)
                 else:
-                    pi_details = "Unclean shutdown during an active session"
-                _log_system_power_audit(
-                    "Power interruption logout",
-                    pi_details,
-                    extra={"lastKnownRole": role, "targetUser": un} if (role or un) else None,
+                    pi_details = "Unclean shutdown during active session"
+                audit_service.log_structured_event(
+                    user="--",
+                    role="--",
+                    action="Power interruption logout",
+                    outcome="success",
+                    entity_type="session",
+                    entity_name="power",
+                    details=pi_details,
+                    event_type="compliance",
+                    target_user=un,
+                    extra={"lastKnownRole": role} if role else None,
+                    request_source="system/startup",
+                    timestamp_ms=audit_time.get("timestamp_ms"),
+                    date_time=audit_time.get("date_time"),
                 )
-                if pending:
-                    pending = dict(pending)
-                    pending["powerAuditLogged"] = True
-                    data_service.write_session_power_audit_pending(pending)
-            _ensure_shaker_stopped_safe()
+                pending = dict(pending)
+                pending["powerAuditLogged"] = True
+                data_service.write_session_power_audit_pending(pending)
         elif pending and had_clean_shutdown and pending.get("powerAuditLogged"):
             pending = dict(pending)
             pending.pop("powerAuditLogged", None)
@@ -1677,61 +1648,6 @@ def _payload_has_protected_feature_overrides(member_data):
     return False
 
 
-def _session_recipe_actor():
-    cur = data_service.get_current_user() or {}
-    username = _norm_username(
-        (request.headers.get("X-User-Username") or "").strip()
-        or cur.get("username")
-        or cur.get("name")
-    )
-    name = (
-        (request.headers.get("X-User-Name") or "").strip()
-        or (cur.get("name") or "").strip()
-        or (cur.get("username") or "").strip()
-        or username
-    )
-    return username, name
-
-
-def _stamp_recipe_actors(processed, existing=None):
-    """Record creator once and last editor on every save. Client cannot spoof creator."""
-    processed = processed if isinstance(processed, dict) else {}
-    existing = existing if isinstance(existing, dict) else {}
-    username, name = _session_recipe_actor()
-    created_user = _norm_username(existing.get("createdByUsername"))
-    created_name = str(existing.get("createdBy") or "").strip()
-    if not created_user:
-        created_user = username
-        created_name = name
-    processed["createdByUsername"] = created_user
-    processed["createdBy"] = created_name or created_user or "--"
-    if username:
-        processed["lastModifiedByUsername"] = username
-        processed["lastModifiedBy"] = name or username
-    elif existing.get("lastModifiedByUsername"):
-        processed["lastModifiedByUsername"] = _norm_username(existing.get("lastModifiedByUsername"))
-        processed["lastModifiedBy"] = str(existing.get("lastModifiedBy") or processed["lastModifiedByUsername"]).strip()
-    return processed
-
-
-def _recipe_actor_usernames(recipe) -> set:
-    r = recipe if isinstance(recipe, dict) else {}
-    names = {
-        _norm_username(r.get("createdByUsername")),
-        _norm_username(r.get("lastModifiedByUsername")),
-    }
-    names.discard("")
-    return names
-
-
-def _recipe_self_approval_blocked(recipe, verified_username) -> bool:
-    """True when the verifier is the recipe creator or last editor."""
-    v = _norm_username(verified_username)
-    if not v:
-        return True
-    return v in _recipe_actor_usernames(recipe)
-
-
 def _apply_recipe_approval_for_session_creator(processed):
     """Factory saves: approve immediately (no QA/Admin verification). Others: pending."""
     if _effective_request_role() != "factory":
@@ -1779,8 +1695,6 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
-    if _recipe_self_approval_blocked(processed, verified_username):
-        return "Creator cannot approve their own recipe.", False
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
@@ -1962,7 +1876,6 @@ def create_recipe():
         if not validation_result.get("valid", False):
             return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
         processed = calculation_service.process_recipe_form_data(recipe_data)
-        _stamp_recipe_actors(processed)
         _apply_recipe_approval_for_session_creator(processed)
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
@@ -2035,13 +1948,12 @@ def update_recipe(recipe_id):
         if not validation_result.get("valid", False):
             return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
         processed = calculation_service.process_recipe_form_data(recipe_data)
-        before_recipe = data_service.get_recipe(recipe_id) or {}
-        _stamp_recipe_actors(processed, existing=before_recipe)
         _apply_recipe_approval_for_session_creator(processed)
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             return jsonify({"error": tok_err}), 401
+        before_recipe = data_service.get_recipe(recipe_id) or {}
         data_service.save_recipe(processed)
         rd = _recipe_edited_audit_detail(before_recipe, processed, recipe_id)
         _audit(None, None, "Recipe edited", rd)
@@ -2147,8 +2059,6 @@ def approve_recipe(recipe_id):
             return jsonify({"ok": False, "error": "Invalid approval state"}), 400
         if st is None:
             return jsonify({"ok": False, "error": "Legacy recipe does not require approval"}), 400
-        if _recipe_self_approval_blocked(recipe, verified_username):
-            return jsonify({"ok": False, "error": "Creator cannot approve their own recipe."}), 403
         verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
         verified_role = (verified.get("role") or role_header or "").strip()
         by_line = verified_name
@@ -2204,12 +2114,7 @@ def put_test_run_checkpoint():
         if rtype not in ("test", "validation"):
             return jsonify({"ok": False, "error": "Checkpoint type must be test or validation"}), 400
         body["_checkpointSavedAt"] = _utc_now_iso()
-        user = data_service.get_current_user() or {}
-        if user:
-            body.setdefault("operatedByUsername", user.get("username") or user.get("name"))
-            body.setdefault("operatorName", user.get("name") or user.get("username"))
-            body.setdefault("operatorRole", user.get("role"))
-        elif not data_service.get_current_user():
+        if not data_service.get_current_user():
             app.logger.warning(
                 "Checkpoint saved without persisted session file (header session restore may apply)"
             )
@@ -3455,24 +3360,6 @@ def login_biometric():
                 }
             ), 403
 
-        expiry = data_service.get_member_password_expiry_state(member)
-        if bool(expiry.get("expired")):
-            _audit_event(
-                action="Biometric login",
-                outcome="denied",
-                entity_type="session",
-                entity_name="biometric",
-                details="Password expired - reset required",
-                target_user=username,
-                extra={"templateId": template_id, "passwordExpiry": expiry},
-            )
-            return jsonify({
-                "error": "Password expired. Reset required.",
-                "passwordExpired": True,
-                "username": username,
-                "expiry": expiry,
-            }), 403
-
         user = dict(member)
         user.pop("password", None)
         user.pop("creationPasswordSalt", None)
@@ -3588,18 +3475,22 @@ def logout():
 
 @app.route("/api/data/auth/session-ui-reset", methods=["POST"])
 def session_ui_reset():
-    """Chromium load/refresh. This is not a power cut.
+    """Clear persisted kiosk session when the browser loads or refreshes.
 
-    Power-interruption logout and auto-aborted reports are owned by
-    `_startup_session_power_audit`. Clearing the session here while a live
-    checkpoint exists would 401 later checkpoint PUTs and drop recovery.
+    If a user was still logged in on the bridge, record Logout (power interruption)
+    so audit trails do not show the prior session as still active after re-login.
     """
     try:
-        if _has_recoverable_test_run_checkpoint():
-            return jsonify({"success": True, "keptSession": True, "activeRun": True}), 200
+        user = data_service.get_current_user()
+        if user:
+            _audit_session_logout(
+                user,
+                "power_interruption",
+                request_source="POST /api/data/auth/session-ui-reset",
+            )
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
-        return jsonify({"success": True, "keptSession": False}), 200
+        return jsonify({"success": True}), 200
     except Exception as e:
         app.logger.exception("Error during session UI reset")
         return jsonify({"error": str(e)}), 500
@@ -5043,12 +4934,7 @@ def export_reports():
             safe_ts = "".join(c for c in ts_raw if c.isalnum() or c in "-_.T") or "ts"
             dest = export_dir / "{}_{}_{}.pdf".format(safe_name, rid, safe_ts)
             try:
-                with open(src, "rb") as fin, open(dest, "wb") as fout:
-                    while True:
-                        chunk = fin.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        fout.write(chunk)
+                data_service._copy_file_durable(src, dest, require_json=False)
                 exported_files.append(str(dest))
                 exported_report_ids.append(int(rid))
             except Exception as e:
@@ -6064,8 +5950,10 @@ def _set_datetime_common():
         return jsonify({"ok": False, "error": rtc_err or "Failed to set RTC time"}), 500
     try:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(DATETIME_STORAGE, "w", encoding="utf-8") as f:
-            json.dump({"datetime": dt_obj.strftime("%Y-%m-%dT%H:%M:%S"), "last_tick": time.time()}, f)
+        data_service._save_json_file(
+            DATETIME_STORAGE,
+            {"datetime": dt_obj.strftime("%Y-%m-%dT%H:%M:%S"), "last_tick": time.time()},
+        )
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     applied = rtc_service.get_device_wall_datetime_payload()
@@ -6138,21 +6026,146 @@ def _start_export_purge_thread():
     t.start()
 
 
-@app.route("/api/scale/read", methods=["GET"])
+_scale_uart_read_lock = threading.Lock()
+
+
+def _scale_uart_port() -> str:
+    port = str(os.environ.get("SCALE_PORT") or "").strip()
+    if port:
+        return port
+    model = re.sub(r"[\s_\-]", "", (os.environ.get("SCALE_MODEL") or "").strip().lower())
+    if model == "bce1202":
+        return "/dev/ttyAMA2"
+    if str(os.environ.get("SCALE_UART_FALLBACK", "1")).strip().lower() in ("1", "true", "yes", "on"):
+        return str(os.environ.get("SCALE_UART_FALLBACK_PORT") or "/dev/ttyAMA5").strip()
+    return ""
+
+
+def _uart_port_share(a: str, b: str) -> bool:
+    a = (a or "").strip()
+    b = (b or "").strip()
+    return bool(a and b and a == b)
+
+
+def _read_scale_weight(timeout_sec: float = 3.0) -> dict:
+    """HX711 when enabled; else external UART (BCE1202 on /dev/ttyAMA1 = GPIO0/1, or ttyAMA5)."""
+    timeout_sec = max(0.5, float(timeout_sec or 3.0))
+    hx711_disabled = str(os.environ.get("HX711_DISABLED", "0")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if not hx711_disabled:
+        hx = None
+        try:
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(hx711_service.read_weight)
+                hx = fut.result(timeout=min(8.0, max(2.0, timeout_sec + 1.0)))
+        except FuturesTimeout:
+            hx = {"ok": False, "error": "HX711 read timed out", "source": "hx711"}
+        except Exception as exc:
+            hx = {"ok": False, "error": str(exc), "source": "hx711"}
+        if hx.get("ok") and hx.get("weight") is not None and not hx.get("simulated"):
+            hx["source"] = "hx711"
+            return hx
+        uart_fb = str(os.environ.get("SCALE_UART_FALLBACK", "0")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if not uart_fb:
+            return hx if isinstance(hx, dict) and hx.get("error") else {
+                "ok": False,
+                "error": hx.get("error") or "HX711 read failed",
+                "source": "hx711",
+            }
+
+    port = _scale_uart_port()
+    if not port:
+        err = hx711_service.read_weight() if not hx711_disabled else None
+        if isinstance(err, dict) and err.get("error"):
+            return err
+        return {"ok": False, "error": "Scale not configured (set SCALE_PORT or HX711)"}
+
+    bio_port = str(os.environ.get("BIOMETRIC_PORT") or config.get("BIOMETRIC_PORT") or "").strip()
+    mux_bio = _uart_port_share(port, bio_port)
+
+    dedicated_uart = bool(port) and not mux_bio
+
+    with _scale_uart_read_lock:
+        if mux_bio:
+            biometric_service.close_serial()
+            scale_service.close_serial()
+        try:
+            if dedicated_uart:
+                result = scale_service.read_weight_blocking(timeout_sec)
+            else:
+                result = scale_service.read_weight_uart_once(port, timeout_sec)
+            if not result.get("ok") and mux_bio:
+                result = scale_service.read_weight_uart_once(port, timeout_sec)
+            if result.get("ok"):
+                result["source"] = result.get("source") or "uart"
+                result["weight"] = round(float(result["weight"]), 4)
+                return result
+            if not hx711_disabled:
+                hx = hx711_service.read_weight()
+                if hx.get("ok") and hx.get("weight") is not None and not hx.get("simulated"):
+                    hx["source"] = "hx711"
+                    return hx
+            return result
+        finally:
+            if mux_bio:
+                scale_service.close_serial()
+                biometric_service.reopen_serial()
+
+
+@app.route("/api/scale/read", methods=["GET", "POST"])
 def api_scale_read():
-    result = hx711_service.read_weight()
-    return jsonify(result)
+    timeout = 3.0
+    model = re.sub(r"[\s_\-]", "", (os.environ.get("SCALE_MODEL") or "").strip().lower())
+    if model == "bce1202":
+        timeout = 8.0
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        try:
+            timeout = float(data.get("timeout") or data.get("timeout_sec") or timeout)
+        except (TypeError, ValueError):
+            pass
+    try:
+        result = _read_scale_weight(timeout)
+    except Exception as exc:
+        app.logger.exception("scale read failed")
+        result = {"ok": False, "error": str(exc)}
+    status = 200 if result.get("ok") else 504
+    return jsonify(result), status
 
 
 @app.route("/api/scale/tare", methods=["POST"])
 def api_scale_tare():
-    ok = hx711_service.tare()
-    return jsonify({"ok": ok})
+    if str(os.environ.get("HX711_DISABLED", "0")).strip().lower() not in ("1", "true", "yes", "on"):
+        ok = hx711_service.tare()
+        return jsonify({"ok": ok})
+    return jsonify({"ok": False, "error": "Tare supported for HX711 load cell only"}), 400
 
 
 @app.route("/api/scale/status", methods=["GET"])
 def api_scale_status():
-    return jsonify(scale_service.get_status())
+    st = scale_service.get_status()
+    st["ok"] = True
+    st["model"] = (os.environ.get("SCALE_MODEL") or "").strip() or None
+    st["hx711_disabled"] = str(os.environ.get("HX711_DISABLED", "0")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    st["hx711"] = hx711_service.get_status()
+    st["uart_fallback_port"] = _scale_uart_port() or None
+    return jsonify(st)
 
 
 _startup_session_power_audit()

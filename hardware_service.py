@@ -1367,8 +1367,8 @@ def cmd_shaker_stop(mode: str = "C", epoch: Optional[int] = None) -> Dict[str, A
 
 def ensure_shaker_stopped() -> Dict[str, Any]:
     """Stop both firmware modes, retrying each until OK. A new start cancels the rest."""
-    if not _ensure_stop_lock.acquire(timeout=20.0):
-        return {"ok": False, "error": "stop lock timeout"}
+    if not _ensure_stop_lock.acquire(blocking=False):
+        return {"ok": True, "skipped": True}
     try:
         epoch = _shaker_epoch_value()
         results: Dict[str, Any] = {}

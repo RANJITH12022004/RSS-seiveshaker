@@ -1819,26 +1819,6 @@ def format_for_a4_printer(
     return text + "\n\n" + footer
 
 
-def _printed_by_lines() -> list:
-    """Logged-in operator at format time. Missing fields print as -- and never fail the print."""
-    name = "--"
-    user_id = "--"
-    try:
-        import data_service
-
-        user = data_service.get_current_user() or {}
-        if isinstance(user, dict):
-            n = str(user.get("name") or "").strip()
-            uid = str(user.get("username") or "").strip()
-            if n:
-                name = n
-            if uid:
-                user_id = uid
-    except Exception:
-        pass
-    return [f"Printed By: {name}", f"User ID: {user_id}"]
-
-
 def _report_timestamp_footer_lines(kind: str = "printed") -> list:
     """Date/time footer from device RTC. kind: 'printed' | 'exported'. Dates use DD/MM/YYYY."""
     try:
@@ -1852,10 +1832,7 @@ def _report_timestamp_footer_lines(kind: str = "printed") -> list:
         pdate = now.strftime("%d/%m/%Y")
         ptime = now.strftime("%H:%M:%S")
     label = "Exported" if str(kind or "").strip().lower() == "exported" else "Printed"
-    lines = ["", f"{label} Date: {pdate}", f"{label} Time: {ptime}"]
-    if label == "Printed":
-        lines.extend(_printed_by_lines())
-    return lines
+    return ["", f"{label} Date: {pdate}", f"{label} Time: {ptime}"]
 
 
 def _thermal_printed_timestamp_lines() -> list:

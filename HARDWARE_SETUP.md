@@ -42,6 +42,29 @@ Probe communication: `python3 scripts/shaker_comm_probe.py`
 
 ---
 
+### Sartorius BCE1202 Weighing Scale (UART2 on GPIO0/1)
+
+| Raspberry Pi (BCM) | Header pin | Scale / line | Device node   |
+|--------------------|------------|--------------|---------------|
+| GPIO0              | 27         | TX → scale RX | `/dev/ttyAMA2` (Pi OS 6.x; was ttyAMA1 on older images) |
+| GPIO1              | 28         | RX ← scale TX |               |
+| GND                | —          | GND          |               |
+
+Requires **Pi 4** device-tree overlay (reboot once):
+
+```txt
+force_eeprom_read=0
+dtoverlay=uart2
+```
+
+App serial format (BCE1202): **9600**, **8-O-1**, line-delimited ASCII (e.g. `+ 123.45 g`).
+
+Environment: `SCALE_MODEL=bce1202`, `SCALE_PORT=/dev/ttyAMA2`, `HX711_DISABLED=1`.
+
+**Do not** use GPIO0/1 for HX711 on this wiring — that blocks UART2.
+
+---
+
 ### R307 Fingerprint Sensor UART
 
 | Raspberry Pi       | R307 Sensor | Device Node (typical) |

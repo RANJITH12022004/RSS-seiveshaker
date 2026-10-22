@@ -155,8 +155,15 @@
 
     window.startScalePoll = function (prefix) {
         stopScalePoll(prefix);
-        _scalePollers[prefix] = setInterval(function () {
-            fetch((typeof API_BASE !== 'undefined' ? API_BASE : '') + '/api/scale/read')
+        var inFlight = false;
+        function tick() {
+            if (inFlight) return;
+            inFlight = true;
+            fetch((typeof API_BASE !== 'undefined' ? API_BASE : '') + '/api/scale/read', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ timeout: 8 })
+            })
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     // Never accept simulated/fake weights — stay on Waiting until real scale.
@@ -164,8 +171,11 @@
                     if (data.weight == null || parseFloat(data.weight) <= 0) return;
                     if (_wzOnWeight) _wzOnWeight(parseFloat(data.weight));
                 })
-                .catch(function () {});
-        }, 800);
+                .catch(function () {})
+                .then(function () { inFlight = false; });
+        }
+        tick();
+        _scalePollers[prefix] = setInterval(tick, 1500);
     };
 
     window.stopScalePoll = function (prefix) {
@@ -588,10 +598,11 @@
             window.currentEditingRecipeId = null;
             if (typeof recipeListMode !== 'undefined') recipeListMode = 'manage';
             goToPage('manage-recipes');
+            if (typeof loadManageRecipes === 'function') loadManageRecipes();
             var rid = (result && result.id != null) ? result.id : ((result && result.recipe && result.recipe.id != null) ? result.recipe.id : null);
             if (rid != null) {
                 setTimeout(function () {
-                    approveSavedRecipeWithCredentials(rid, 'Save Recipe', '', result && result.recipe).then(function (res) {
+                    approveSavedRecipeWithCredentials(rid, 'Save Recipe', '').then(function (res) {
                         if (res && res.cancelled) {
                             showAppModal('Recipe saved. It stays pending until a QA or Admin approves it.', 'Save Recipe');
                         }
@@ -1067,8 +1078,8 @@
         var numSieves = parseInt(recipe.numSieves, 10) || 0;
         var sieveSizes = recipe.sieveSizes || [];
         var steps = [];
-        var autoInstr = 'Place item on scale and wait for reading';
-        var sampleInstr = 'Place sample on scale and wait for reading';
+        var autoInstr = 'Place on scale, then press Print on the balance if the reading stays on Waiting';
+        var sampleInstr = 'Place sample on scale, then press Print on the balance if needed';
         if (analysisOn) {
             for (var i = 0; i < numSieves; i++) {
                 steps.push({ label: 'Sieve ' + (i + 1) + ' (' + (sieveSizes[i] || '?') + ' \u00b5m)', instruction: autoInstr });
@@ -1404,6 +1415,9 @@
 
     window.trHandleStartButton = function () {
         if (_sr.running || _sr.done) return;
+        if (!_sr.recipe || !_sr.recipe.productName) {
+            _sr.recipe = window.activeTestRecipe || _sr.recipe || {};
+        }
         var recipe = _sr.recipe || {};
         // Start before-test weight wizard
         _startBeforeWizard(recipe, function (weights) {
@@ -1683,8 +1697,6 @@
                     testEndTime: nowIso,
                     testedBy: typeof getCurrentUser === 'function' ? getCurrentUser() : ''
                 },
-                operatedByUsername: typeof getCurrentUser === 'function' ? getCurrentUser() : '',
-                operatorName: typeof getCurrentUser === 'function' ? getCurrentUser() : '',
                 _checkpointPhase: phase || 'running',
                 _checkpointAt: nowIso,
                 createdAt: _valState.startIso || nowIso,
@@ -1814,7 +1826,11 @@
     };
 
     function _stopShakerValidation(aborted) {
-        _valEnsureStopped();
+        if (aborted) {
+            _valSendStopIfNeeded();
+        } else if (!_valState.stopCommandSent) {
+            _valSendStopIfNeeded();
+        }
         if (aborted) {
             _valState.runEndElapsedSeconds = _valCaptureElapsed();
         } else {
@@ -1860,14 +1876,13 @@
         }
     }
 
-    function _valEnsureStopped() {
+    var _VAL_STOP_LEAD_MS = 1800;
+
+    function _valSendStopIfNeeded() {
+        if (_valState.stopCommandSent) return;
         _valState.stopCommandSent = true;
-        return apiRequest(API_BASE + '/api/hardware/shaker/ensure-stopped', { method: 'POST', body: {} })
-            .catch(function () {
-                var mode = _valHwMode(_valState.type);
-                return apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } })
-                    .catch(function () { return null; });
-            });
+        var mode = _valHwMode(_valState.type);
+        apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } }).catch(function () {});
     }
 
     function _startValPoll() {
@@ -1882,6 +1897,10 @@
             if (el && typeof formatSecondsToMmSs === 'function') el.textContent = formatSecondsToMmSs(elapsed);
             _valWriteCheckpoint('running');
             var durMs = (_valState.durationSec || 0) * 1000;
+            var leadMs = durMs > _VAL_STOP_LEAD_MS + 500 ? _VAL_STOP_LEAD_MS : 0;
+            if (leadMs && elapsedMs >= durMs - leadMs) {
+                _valSendStopIfNeeded();
+            }
             if (elapsedMs >= durMs) {
                 _valState.runEndElapsedSeconds = _valState.durationSec || elapsed;
                 _stopShakerValidation(false);
@@ -1936,18 +1955,16 @@
             createdAt: startIso
         };
 
-        _valEnsureStopped().then(function () {
-            return apiRequest(API_BASE + '/api/data/reports', {
-                method: 'POST',
-                body: {
-                    type: 'validation',
-                    name: 'Sieve Shaker Validation - ' + _valTypeLabel(_valState.type),
-                    testData: validationReport,
-                    isValidation: true,
-                    createdAt: startIso,
-                    completedAt: endIso
-                }
-            });
+        apiRequest(API_BASE + '/api/data/reports', {
+            method: 'POST',
+            body: {
+                type: 'validation',
+                name: 'Sieve Shaker Validation - ' + _valTypeLabel(_valState.type),
+                testData: validationReport,
+                isValidation: true,
+                createdAt: startIso,
+                completedAt: endIso
+            }
         }).then(function (res) {
             return _valClearCheckpoint().then(function () { return res; });
         }).then(function (res) {
@@ -1983,7 +2000,9 @@
         _valState.awaitingActualAmplitude = false;
         if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(false);
         _stopValPoll();
-        return _valEnsureStopped()
+        var mode = _valHwMode(_valState.type);
+        return apiRequest(API_BASE + '/api/hardware/shaker/stop', { method: 'POST', body: { mode: mode } })
+            .catch(function () { return null; })
             .then(function () {
                 var elapsed = _valState.startTime ? Math.floor((Date.now() - _valState.startTime) / 1000) : 0;
                 var endIso = _valNowIso();

@@ -8,9 +8,11 @@ All data stored as JSON files under STORAGE_DIR.
 import hashlib
 import hmac
 import json
+import logging
 import os
 import pathlib
 import secrets
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -20,6 +22,18 @@ _config = {}
 _storage_dir = None
 _reports_dir = None
 _current_user = None
+_storage_lock = threading.RLock()
+_logger = logging.getLogger("data_service")
+_NEVER_EMPTY_OVERWRITE = frozenset({"members.json", "factorySettings.json"})
+_CRITICAL_JSON_FILES = (
+    "members.json",
+    "recipes.json",
+    "reports.json",
+    "factorySettings.json",
+    "disabled_recipes.json",
+    "test_run.json",
+    "datetime.json",
+)
 
 FACTORY_USERNAME = "RLERLT"
 FACTORY_PASSWORD = "Rahul"
@@ -198,6 +212,7 @@ def init(config):
     _reports_dir = pathlib.Path(_config.get("REPORTS_DIR", "./reports"))
     _storage_dir.mkdir(parents=True, exist_ok=True)
     _reports_dir.mkdir(parents=True, exist_ok=True)
+    _repair_corrupt_storage_files()
     _sync_factory_settings_storage()
 
 
@@ -311,45 +326,277 @@ def _get_storage_path(filename: str) -> pathlib.Path:
     return _storage_dir / safe_name
 
 
-def _load_json_file(filepath: pathlib.Path, default=None):
-    if default is None:
-        default = []
-    if not filepath.exists():
-        return default
+def _backup_path(filepath: pathlib.Path) -> pathlib.Path:
+    return filepath.with_name(filepath.name + ".bak")
+
+
+def _unique_tmp_path(filepath: pathlib.Path) -> pathlib.Path:
+    return filepath.parent / "{}.{}.{}.tmp".format(
+        filepath.name, os.getpid(), secrets.token_hex(4)
+    )
+
+
+def _fsync_dir(dirpath: pathlib.Path) -> None:
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if data is not None else default
-    except Exception:
-        return default
-
-
-def _save_json_file(filepath: pathlib.Path, data):
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def _save_json_file_durable(filepath: pathlib.Path, data):
-    """Atomic replace + fsync so sudden power loss keeps the last complete checkpoint."""
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp_path, filepath)
-    try:
-        dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+        dir_fd = os.open(str(dirpath), os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
     except OSError:
         pass
+
+
+def _is_empty_payload(data) -> bool:
+    if data is None:
+        return True
+    if isinstance(data, (list, dict, str, bytes)) and len(data) == 0:
+        return True
+    return False
+
+
+def _has_protected_records(data) -> bool:
+    if isinstance(data, list):
+        return len(data) > 0
+    if isinstance(data, dict):
+        return len(data) > 0
+    return False
+
+
+def _parse_json_bytes(raw: bytes):
+    if not raw or not raw.strip():
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _read_valid_json_bytes(filepath: pathlib.Path) -> Optional[bytes]:
+    try:
+        if not filepath.exists() or filepath.stat().st_size < 1:
+            return None
+        raw = filepath.read_bytes()
+        if _parse_json_bytes(raw) is None:
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def _parse_json_file(filepath: pathlib.Path):
+    raw = _read_valid_json_bytes(filepath)
+    if raw is None:
+        return None
+    return _parse_json_bytes(raw)
+
+
+def _write_bytes_durable(dest: pathlib.Path, raw: bytes, *, require_json: bool = True) -> None:
+    """Write bytes via unique tmp + fsync + replace. Never open the live file with 'w'."""
+    if not raw:
+        raise ValueError("Refusing 0-byte USB write for {}".format(dest.name))
+    if require_json:
+        if not raw.strip():
+            raise ValueError("Refusing empty USB JSON for {}".format(dest.name))
+        if _parse_json_bytes(raw) is None:
+            raise ValueError("Refusing invalid USB JSON for {}".format(dest.name))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _unique_tmp_path(dest)
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        if tmp_path.stat().st_size < 1:
+            raise ValueError("Temp write produced 0 bytes for {}".format(dest.name))
+        if require_json:
+            verified = tmp_path.read_bytes()
+            if _parse_json_bytes(verified) is None:
+                raise ValueError("Temp JSON failed re-read for {}".format(dest.name))
+        live_ok = None
+        if dest.exists() and dest.stat().st_size > 0:
+            if require_json:
+                live_ok = _read_valid_json_bytes(dest)
+            else:
+                try:
+                    live_ok = dest.read_bytes()
+                except Exception:
+                    live_ok = None
+        if live_ok:
+            bak = _backup_path(dest)
+            bak_tmp = _unique_tmp_path(bak)
+            try:
+                with open(bak_tmp, "wb") as f:
+                    f.write(live_ok)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(bak_tmp, bak)
+                _fsync_dir(dest.parent)
+            except Exception:
+                try:
+                    if bak_tmp.exists():
+                        bak_tmp.unlink()
+                except OSError:
+                    pass
+                raise
+        os.replace(tmp_path, dest)
+        _fsync_dir(dest.parent)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _copy_file_durable(src: pathlib.Path, dest: pathlib.Path, *, require_json: bool = False) -> None:
+    raw = src.read_bytes()
+    if not raw:
+        raise ValueError("Refusing to copy 0-byte file {}".format(src.name))
+    _write_bytes_durable(dest, raw, require_json=require_json)
+
+
+def _ensure_backup_if_missing(filepath: pathlib.Path) -> None:
+    raw = _read_valid_json_bytes(filepath)
+    if not raw:
+        return
+    bak = _backup_path(filepath)
+    if _read_valid_json_bytes(bak):
+        return
+    try:
+        _write_bytes_durable(bak, raw, require_json=True)
+    except Exception:
+        _logger.exception("Could not seed backup for %s", filepath.name)
+
+
+def _repair_corrupt_storage_files() -> None:
+    if not _storage_dir:
+        return
+    with _storage_lock:
+        for name in _CRITICAL_JSON_FILES:
+            path = _get_storage_path(name)
+            live = _parse_json_file(path)
+            if live is not None:
+                _ensure_backup_if_missing(path)
+                continue
+            bak_path = _backup_path(path)
+            bak_raw = _read_valid_json_bytes(bak_path)
+            if bak_raw is None:
+                continue
+            try:
+                _write_bytes_durable(path, bak_raw, require_json=True)
+                _logger.warning("Restored %s from .bak (live was empty or corrupt)", name)
+            except Exception:
+                _logger.exception("Could not restore %s from backup", name)
+
+
+def archive_usb_snapshot(reason: str) -> str:
+    """Copy live USB JSON, report files, and audit DB into storage/archive before any wipe."""
+    if not _storage_dir:
+        raise RuntimeError("Storage is not initialized")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_reason = "".join(c for c in (reason or "snapshot") if c.isalnum() or c in "-_") or "snapshot"
+    dest = _storage_dir / "archive" / "{}-{}".format(safe_reason, stamp)
+    dest.mkdir(parents=True, exist_ok=True)
+    with _storage_lock:
+        for src in list(_storage_dir.iterdir()):
+            if not src.is_file():
+                continue
+            name = src.name
+            if name.endswith(".tmp"):
+                continue
+            is_json = name.endswith(".json") or name.endswith(".json.bak")
+            is_flag = name.endswith(".flag")
+            is_bak = name.endswith(".bak")
+            if not (is_json or is_flag or is_bak):
+                continue
+            try:
+                if src.stat().st_size < 1:
+                    continue
+                _copy_file_durable(src, dest / name, require_json=is_json and not name.endswith(".bak"))
+            except Exception:
+                _logger.exception("archive skip %s", name)
+                if name in _NEVER_EMPTY_OVERWRITE:
+                    raise
+        if _reports_dir and _reports_dir.exists():
+            reports_dest = dest / "reports"
+            reports_dest.mkdir(parents=True, exist_ok=True)
+            for src in list(_reports_dir.iterdir()):
+                if not src.is_file() or src.name.endswith(".tmp"):
+                    continue
+                try:
+                    if src.stat().st_size < 1:
+                        continue
+                    _copy_file_durable(src, reports_dest / src.name, require_json=False)
+                except Exception:
+                    _logger.exception("archive skip report %s", src.name)
+        audit_dir_raw = _config.get("AUDIT_DB_DIR")
+        if audit_dir_raw:
+            audit_dir = pathlib.Path(audit_dir_raw)
+            for name in ("audit_log.db", "audit_log.db-wal", "audit_log.db-shm"):
+                src = audit_dir / name
+                if not src.is_file():
+                    continue
+                try:
+                    if src.stat().st_size < 1:
+                        continue
+                    _copy_file_durable(src, dest / name, require_json=False)
+                except Exception:
+                    _logger.exception("archive skip %s", name)
+        _fsync_dir(dest)
+        _fsync_dir(dest.parent)
+    return str(dest)
+
+
+def _load_json_file(filepath: pathlib.Path, default=None):
+    """Load JSON; recover from .bak if live is missing, 0-byte, or corrupt."""
+    if default is None:
+        default = []
+    with _storage_lock:
+        live = _parse_json_file(filepath)
+        if live is not None:
+            return live
+        bak_path = _backup_path(filepath)
+        bak_raw = _read_valid_json_bytes(bak_path)
+        if bak_raw is None:
+            return default
+        bak = _parse_json_bytes(bak_raw)
+        try:
+            _write_bytes_durable(filepath, bak_raw, require_json=True)
+            _logger.warning("Restored live %s from .bak", filepath.name)
+        except Exception:
+            _logger.exception("Failed to restore live %s from backup", filepath.name)
+        return bak if bak is not None else default
+
+
+def _save_json_file(filepath: pathlib.Path, data, *, allow_empty: bool = False):
+    """Write JSON through the durable path. Never open the live file with 'w'."""
+    _save_json_file_durable(filepath, data, allow_empty=allow_empty)
+
+
+def _save_json_file_durable(filepath: pathlib.Path, data, *, allow_empty: bool = False) -> None:
+    """VFAT-safe JSON write: unique tmp, fsync, re-read, backup live, then replace."""
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    raw = payload.encode("utf-8")
+    if not raw or not raw.strip():
+        raise ValueError("Refusing empty USB JSON payload for {}".format(filepath.name))
+    if _parse_json_bytes(raw) is None:
+        raise ValueError("Refusing invalid USB JSON payload for {}".format(filepath.name))
+    with _storage_lock:
+        if (
+            not allow_empty
+            and filepath.name in _NEVER_EMPTY_OVERWRITE
+            and _is_empty_payload(data)
+        ):
+            existing = _parse_json_file(filepath)
+            if existing is None:
+                existing = _parse_json_file(_backup_path(filepath))
+            if _has_protected_records(existing):
+                raise ValueError(
+                    "Refusing to erase {} on USB (CFR store)".format(filepath.name)
+                )
+        _write_bytes_durable(filepath, raw, require_json=True)
 
 
 # =================== RECIPE OPERATIONS ==========================
@@ -1273,7 +1520,7 @@ def enable_member(member_id: int) -> Dict[str, Any]:
 
 
 def factory_reset() -> Dict[str, Any]:
-    """Delete all operational data. Preserves factorySettings.json only."""
+    """Reset operational JSON after archiving USB data. Never unlinks members.json."""
     recipes_path = _get_storage_path("recipes.json")
     reports_path = _get_storage_path("reports.json")
     members_path = _get_storage_path("members.json")
@@ -1284,18 +1531,29 @@ def factory_reset() -> Dict[str, Any]:
     n_recipes = len(recipes) if isinstance(recipes, list) else 0
     n_reports = len(reports) if isinstance(reports, list) else 0
     n_members = len(members) if isinstance(members, list) else 0
-    _save_json_file(recipes_path, [])
-    _save_json_file(reports_path, [])
-    _save_json_file(members_path, [])
+    archive_dir = archive_usb_snapshot("factory-reset")
+    if _has_protected_records(members):
+        archived_members = pathlib.Path(archive_dir) / "members.json"
+        if _parse_json_file(archived_members) is None:
+            raise RuntimeError("Factory reset refused: members.json was not archived")
+    _save_json_file(recipes_path, [], allow_empty=True)
+    _save_json_file(reports_path, [], allow_empty=True)
+    _save_json_file(members_path, [], allow_empty=True)
     n_report_files = 0
+    reports_archive = pathlib.Path(archive_dir) / "reports"
     if _reports_dir and _reports_dir.exists():
         for f in list(_reports_dir.iterdir()):
-            if f.is_file():
-                try:
-                    f.unlink()
-                    n_report_files += 1
-                except Exception:
-                    pass
+            if not f.is_file():
+                continue
+            archived = reports_archive / f.name
+            if not archived.exists() or archived.stat().st_size < 1:
+                _logger.warning("factory reset: keeping report %s (not archived)", f.name)
+                continue
+            try:
+                f.unlink()
+                n_report_files += 1
+            except Exception:
+                pass
     n_storage_files = 0
     for extra_name in (
         "test_run.json",
@@ -1306,9 +1564,17 @@ def factory_reset() -> Dict[str, Any]:
         "disabled_recipes.json",
         "current_user.json",
         "session_power_audit_pending.json",
+        "report_export_schedule.json",
+        "audit_export_schedule.json",
     ):
         extra_path = _get_storage_path(extra_name)
         if extra_path.exists():
+            archived = pathlib.Path(archive_dir) / extra_name
+            if extra_path.stat().st_size > 0 and (
+                not archived.exists() or archived.stat().st_size < 1
+            ):
+                _logger.warning("factory reset: keeping %s (not archived)", extra_name)
+                continue
             try:
                 extra_path.unlink()
                 n_storage_files += 1
@@ -1339,6 +1605,7 @@ def factory_reset() -> Dict[str, Any]:
             "members": n_members,
             "reportFiles": n_report_files,
             "storageFiles": n_storage_files,
+            "archiveDir": archive_dir,
         }
     }
 
@@ -1523,11 +1790,8 @@ def _report_export_schedule_path() -> pathlib.Path:
 
 def _load_report_export_schedule() -> Dict[str, Any]:
     path = _report_export_schedule_path()
-    if not path.is_file():
-        return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = _load_json_file(path, default={})
         if isinstance(data, dict):
             return data
         if isinstance(data, list):
@@ -1589,10 +1853,7 @@ def _load_report_export_schedule() -> Dict[str, Any]:
 
 
 def _save_report_export_schedule(data: Dict[str, Any]) -> None:
-    path = _report_export_schedule_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _save_json_file(_report_export_schedule_path(), data)
 
 
 def clear_report_export_schedule() -> None:

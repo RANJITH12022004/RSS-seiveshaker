@@ -11,6 +11,61 @@ def init():
     pass
 
 
+def _parse_mmss_to_seconds(val) -> Optional[int]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        n = int(val)
+        return n if n > 0 else None
+    s = str(val).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        n = int(s)
+        return n if n > 0 else None
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            if len(parts) == 2:
+                mm, ss = int(parts[0]), int(parts[1])
+                n = mm * 60 + ss
+                return n if n > 0 else None
+            if len(parts) == 3:
+                hh, mm, ss = int(parts[0]), int(parts[1]), int(parts[2])
+                n = hh * 3600 + mm * 60 + ss
+                return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _coalesce_duration_seconds(recipe_data: Dict[str, Any]) -> None:
+    if recipe_data.get("durationSeconds") not in (None, "", 0):
+        try:
+            if int(recipe_data.get("durationSeconds")) > 0:
+                return
+        except (TypeError, ValueError):
+            pass
+    for key in ("duration", "durationMmSs", "setDuration", "targetDuration"):
+        sec = _parse_mmss_to_seconds(recipe_data.get(key))
+        if sec:
+            recipe_data["durationSeconds"] = sec
+            return
+    mode = str(recipe_data.get("shakerMode") or "").strip().upper()
+    if mode == "LOGICAL":
+        segs = recipe_data.get("logicalSegments") or []
+        total = 0
+        for seg in segs:
+            try:
+                total += max(0, int(seg.get("durationSeconds") or 0))
+            except (TypeError, ValueError):
+                pass
+        if total > 0:
+            recipe_data["durationSeconds"] = total
+
+
 def _safe_float(val, default: float = 0.0) -> float:
     try:
         if val is None or val == "":
@@ -158,6 +213,8 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
     Validate sieve shaker recipe.
     Required: productName, shakerMode, amplitude (5-30).
     """
+    recipe_data = dict(recipe_data or {})
+    _coalesce_duration_seconds(recipe_data)
     errors = []
     name = (recipe_data.get("productName") or recipe_data.get("name") or "").strip()
     if not name:
@@ -192,6 +249,7 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
 def process_recipe_form_data(form_data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize recipe form data for storage."""
     recipe = dict(form_data)
+    _coalesce_duration_seconds(recipe)
     recipe["shakerMode"] = str(recipe.get("shakerMode") or "CONTINUOUS").strip().upper()
     if recipe.get("amplitude") is not None:
         recipe["amplitude"] = int(recipe["amplitude"])
