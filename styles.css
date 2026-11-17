@@ -2907,6 +2907,22 @@ body {
     background: #7e22ce;
 }
 
+
+.reports-filter-unapproved {
+    background: #d97706;
+    border-color: #b45309;
+    color: #fff;
+}
+
+.reports-filter-unapproved:hover {
+    background: #b45309;
+    border-color: #92400e;
+}
+
+.reports-filter-unapproved svg {
+    stroke: #fff;
+}
+
 .reports-filter-audit {
     background: #0891b2;
     border-color: #0e7490;
@@ -5779,9 +5795,14 @@ input[type="number"] {
 .app-container.report-approval-locked .test-card,
 .app-container.report-approval-locked #report-preview-actions .btn-close,
 .app-container.report-approval-locked #page-report-preview .btn-close,
-.app-container.report-approval-locked #page-report-preview .btn-secondary {
+.app-container.report-approval-locked #page-report-preview .btn-secondary:not(#btn-report-approve-later) {
     pointer-events: none;
     cursor: not-allowed;
+}
+
+.app-container.report-approval-locked #btn-report-approve-later.report-approve-later-btn {
+    pointer-events: auto !important;
+    cursor: pointer !important;
 }
 
 .app-container.report-approval-locked .nav-item[data-page],
@@ -7120,6 +7141,22 @@ input[type="number"] {
 
 .reports-filter-validation:hover {
     background: #7e22ce;
+}
+
+
+.reports-filter-unapproved {
+    background: #d97706;
+    border-color: #b45309;
+    color: #fff;
+}
+
+.reports-filter-unapproved:hover {
+    background: #b45309;
+    border-color: #92400e;
+}
+
+.reports-filter-unapproved svg {
+    stroke: #fff;
 }
 
 .reports-filter-audit {

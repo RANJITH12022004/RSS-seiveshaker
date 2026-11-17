@@ -9,8 +9,8 @@
     <title>Sieve Shaker</title>
     <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
     <link rel="stylesheet" href="/keyboard.css">
-    <link rel="stylesheet" href="/styles.css?v=43" id="app-main-css"
-        onerror="(function(l){var n=parseInt(l.getAttribute('data-retry')||'0',10);if(n>=8)return;l.setAttribute('data-retry',String(n+1));setTimeout(function(){l.href='/styles.css?v=43&r='+(n+1)+'&t='+Date.now();},200*(n+1));})(this)">
+    <link rel="stylesheet" href="/styles.css?v=44" id="app-main-css"
+        onerror="(function(l){var n=parseInt(l.getAttribute('data-retry')||'0',10);if(n>=8)return;l.setAttribute('data-retry',String(n+1));setTimeout(function(){l.href='/styles.css?v=44&r='+(n+1)+'&t='+Date.now();},200*(n+1));})(this)">
 </head>
 
 <body>
@@ -880,6 +880,16 @@
                                 </svg>
                                 <span>Validation Reports</span>
                             </button>
+                            <button class="reports-filter-btn reports-filter-unapproved"
+                                onclick="filterReports('unapproved')">
+                                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                                </svg>
+                                <span>Unapproved Reports</span>
+                            </button>
                             <button class="reports-filter-btn reports-filter-audit" onclick="filterReports('audit')">
                                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                     stroke-width="2">
@@ -990,7 +1000,7 @@
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
                     <div class="reports-container">
-                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen to approve the report. You cannot leave or log out until approved. If power is interrupted during a completed test awaiting approval, the report will be saved as Aborted (power interruption). Operator aborts stay Aborted.</div>
+                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen to approve the report, or tap <strong>Approve later</strong> to continue using the machine. Deferred reports appear under Unapproved Reports. Print and USB export stay disabled until approval. If power is interrupted during a completed test awaiting approval, the report will be saved as Aborted (power interruption). Operator aborts stay Aborted.</div>
                         <div class="report-preview-container report-print-template" id="report-content">
                             <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;"></pre>
                             <div id="report-html-preview" style="display: none;"></div>
@@ -1176,6 +1186,7 @@
                                     Thermal</button>
                                 <button class="btn-export" onclick="handleExportReport()">Export to USB</button>
                             </div>
+                            <button type="button" id="btn-report-approve-later" class="btn report-approve-later-btn" style="display: none;" onclick="deferReportApprovalLater()">Approve later</button>
                             <button class="btn-close" onclick="goToPage('reports')">Close</button>
                         </div>
                     </div>
@@ -1977,7 +1988,7 @@
     <script src="/keyboard.js?v=6"></script>
     <script src="/input-focus.js?v=1"></script>
     <script src="/rbac.js?v=10"></script>
-    <script src="/script.js?v=104"></script>
+    <script src="/script.js?v=106"></script>
     <script src="/shaker_ui.js?v=20"></script>
 </body>
 

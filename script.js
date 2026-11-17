@@ -1091,11 +1091,61 @@ function isCurrentUserReportOperator(preview) {
     return !!(op && cur && op === cur);
 }
 
+var REPORT_APPROVAL_DEFER_SS_KEY = 'kioskReportApprovalDeferredIds';
+
+function loadDeferredReportApprovalIds() {
+    try {
+        var raw = sessionStorage.getItem(REPORT_APPROVAL_DEFER_SS_KEY);
+        if (!raw) return [];
+        var arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return [];
+        return arr.map(function (id) { return String(id); });
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveDeferredReportApprovalIds(ids) {
+    try {
+        sessionStorage.setItem(REPORT_APPROVAL_DEFER_SS_KEY, JSON.stringify(ids || []));
+    } catch (e) { /* ignore */ }
+}
+
+function isReportApprovalDeferred(reportId) {
+    if (reportId == null) return false;
+    return loadDeferredReportApprovalIds().indexOf(String(reportId)) >= 0;
+}
+
+function markReportApprovalDeferred(reportId) {
+    if (reportId == null) return;
+    var sid = String(reportId);
+    var ids = loadDeferredReportApprovalIds();
+    if (ids.indexOf(sid) < 0) ids.push(sid);
+    saveDeferredReportApprovalIds(ids);
+}
+
+function clearReportApprovalDeferred(reportId) {
+    if (reportId == null) return;
+    var sid = String(reportId);
+    saveDeferredReportApprovalIds(loadDeferredReportApprovalIds().filter(function (id) {
+        return id !== sid;
+    }));
+}
+
+function clearAllDeferredReportApprovals() {
+    try {
+        sessionStorage.removeItem(REPORT_APPROVAL_DEFER_SS_KEY);
+    } catch (e) { /* ignore */ }
+}
+
 function isReportPreviewNavigationLocked(preview) {
     var p = preview || window._lastReportPreview || {};
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
     if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation') return false;
-    return isReportPendingApproval(p);
+    if (!isReportPendingApproval(p)) return false;
+    var rid = currentReportId != null ? currentReportId : (p.id != null ? p.id : null);
+    if (isReportApprovalDeferred(rid)) return false;
+    return true;
 }
 
 /** @deprecated Use isReportPreviewNavigationLocked for navigation; kept for compatibility. */
@@ -1111,7 +1161,7 @@ function guardReportPreviewNavigation(targetPage) {
     if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return false;
     if (targetPage === 'report-preview') return false;
     showAppModal(
-        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save the test as Completed (power interruption), approved by System with Fail. Operator aborts stay Aborted.',
+        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, tap Approve later to continue using the machine, or power off will save the test as Completed (power interruption), approved by System with Fail. Operator aborts stay Aborted.',
         'Report'
     );
     var active = document.querySelector('.page.active');
@@ -1143,6 +1193,10 @@ function clearReportApprovalGate() {
 
 function setReportApprovalGateFromPreview(preview, reportId) {
     if (!isReportPendingApproval(preview)) {
+        clearReportApprovalGate();
+        return;
+    }
+    if (isReportApprovalDeferred(reportId)) {
         clearReportApprovalGate();
         return;
     }
@@ -1365,6 +1419,28 @@ function scrollReportPendingBannerIntoView() {
     }
 }
 
+function deferReportApprovalLater() {
+    var preview = window._lastReportPreview || {};
+    var rid = currentReportId != null ? currentReportId : preview.id;
+    if (rid == null || !isReportPendingApproval(preview)) return;
+    if (!isReportPreviewNavigationLocked(preview)) return;
+    markReportApprovalDeferred(rid);
+    clearReportApprovalGate();
+    stopReportApprovalPoll();
+    if (typeof logAuditEvent === 'function') {
+        logAuditEvent(
+            'Report approval deferred',
+            'User chose Approve later | report id ' + rid,
+            { entityType: 'report', entityId: rid }
+        );
+    }
+    applyReportPreviewLockUi(preview);
+    if (typeof _trClearTestRunCheckpoint === 'function') _trClearTestRunCheckpoint();
+    _suppressTestRunNavGuardOnce = true;
+    goToPage('reports');
+    if (typeof filterReports === 'function') filterReports('unapproved');
+}
+
 function applyReportPreviewLockUi(preview) {
     preview = preview || window._lastReportPreview;
     var locked = isReportPreviewNavigationLocked(preview);
@@ -1372,6 +1448,13 @@ function applyReportPreviewLockUi(preview) {
     if (app) app.classList.toggle('report-approval-locked', !!locked);
     var banner = document.getElementById('report-pending-lock-banner');
     if (banner) banner.style.display = locked ? 'block' : 'none';
+    var deferBtn = document.getElementById('btn-report-approve-later');
+    if (deferBtn) {
+        deferBtn.style.display = locked ? '' : 'none';
+        // styles.css disables .btn-secondary under report-approval-locked; keep Approve later clickable.
+        deferBtn.style.pointerEvents = locked ? 'auto' : '';
+        deferBtn.style.cursor = locked ? 'pointer' : '';
+    }
     var closeBtn = document.querySelector('#report-preview-actions .btn-close');
     if (closeBtn) closeBtn.style.display = locked ? 'none' : '';
     var backBtn = document.getElementById('header-back-btn');
@@ -2821,6 +2904,7 @@ function logout() {
             try { localStorage.removeItem('currentUser'); } catch (e) {}
             if (typeof currentUser !== 'undefined') currentUser = null;
             clearReportApprovalGate();
+            clearAllDeferredReportApprovals();
             showLoginScreen();
         });
     };
@@ -4400,8 +4484,13 @@ function exportFromSelection(type) {
         exportAuditTrails();
         return;
     }
+    if (currentReportFilter === 'unapproved') {
+        showAppModal('Unapproved reports cannot be exported. Approve them first, then export from Test or Validation reports.', 'Export Reports');
+        return;
+    }
     var exportFilter = (currentReportFilter === 'test' || currentReportFilter === 'validation')
-        ? currentReportFilter : (lastReportListFilter || 'all');
+        ? currentReportFilter
+        : (lastReportListFilter === 'unapproved' ? 'all' : (lastReportListFilter || 'all'));
     showLoadingOverlay('Export Reports', 'Loading report list...', { cancellable: false });
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(exportFilter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
@@ -5496,7 +5585,9 @@ function loadReports(filterType) {
 
     if (bar) bar.style.display = 'none';
     if (theadRow) theadRow.innerHTML = '<th>SL No</th><th>Report Name</th><th>Creation Time</th><th>Action</th>';
-    var filter = (filterType === 'test' || filterType === 'validation') ? filterType : 'all';
+    var filter = (filterType === 'test' || filterType === 'validation' || filterType === 'unapproved')
+        ? filterType
+        : 'all';
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
         if (!list.length) {
@@ -5513,6 +5604,9 @@ function loadReports(filterType) {
                     }
                 }
                 if (!name) name = (r.recipe && r.recipe.productName) || 'Report ' + (r.id || (i + 1));
+                if (filterType === 'unapproved') {
+                    name = name + ' (awaiting approval)';
+                }
                 var createdRaw = r.createdAt || r.completedAt || r.created || '';
                 var created = (typeof formatReportDate === 'function')
                     ? formatReportDate(createdRaw)
@@ -6580,6 +6674,7 @@ function submitReportApprove() {
         if (ok === true) {
             resetReportApproveForm();
             window._reportApproveFormReportId = null;
+            clearReportApprovalDeferred(id);
             clearReportApprovalGate();
             if (typeof _trClearTestRunCheckpoint === 'function') _trClearTestRunCheckpoint();
             showAppModal('Report approved.', 'Report');
@@ -6615,6 +6710,7 @@ function submitReportApproveBiometric() {
         if (ok === true) {
             resetReportApproveForm();
             window._reportApproveFormReportId = null;
+            clearReportApprovalDeferred(id);
             clearReportApprovalGate();
             if (typeof _trClearTestRunCheckpoint === 'function') _trClearTestRunCheckpoint();
             showAppModal('Report approved.', 'Report');

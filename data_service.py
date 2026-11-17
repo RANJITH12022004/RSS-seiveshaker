@@ -782,9 +782,20 @@ def report_visible_in_list(report: Dict[str, Any]) -> bool:
 def list_reports(filter_type="all", include_pending=False):
     """List reports, optionally filtered by type."""
     reports = _load_reports_raw()
+    if filter_type == "unapproved":
+        include_pending = True
     if not include_pending:
         reports = [r for r in reports if report_visible_in_list(r)]
-    if filter_type and filter_type != "all":
+    if filter_type == "unapproved":
+        def _pending_approval_report(r):
+            if not isinstance(r, dict):
+                return False
+            st = str(r.get("reportApprovalStatus") or "").strip().lower()
+            rt = str(r.get("type") or "").strip().lower()
+            return st == "pending" and rt in ("test", "validation", "calibration")
+
+        reports = [r for r in reports if _pending_approval_report(r)]
+    elif filter_type and filter_type != "all":
         reports = [r for r in reports if r.get("type") == filter_type]
 
     def sort_key(r):
