@@ -83,7 +83,7 @@ INTERNAL_PERMISSION_IMPLICATIONS: Dict[str, Set[str]] = {
 
 FEATURE_CATALOG_KEYS = sorted(set(PERMISSION_CARD_KEYS + LEGACY_INTERNAL_KEYS))
 
-# --- Legacy role table (same semantics as rbac.js ROLE_RESTRICTIONS) ---
+# --- Legacy role table (v1 migration only). Runtime grants use permission cards. ---
 
 ROLE_RESTRICTIONS: Dict[str, Dict[str, str]] = {
     "admin": {

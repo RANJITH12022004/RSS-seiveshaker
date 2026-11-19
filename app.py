@@ -791,11 +791,24 @@ def _audit_power_loss_aborted_report(report: dict) -> None:
     _audit_unclean_shutdown_aborted_report(report)
 
 
+def _report_is_approval_deferred(report: dict) -> bool:
+    """True when operator chose Approve later — leave pending in Unapproved Reports."""
+    if not isinstance(report, dict):
+        return False
+    val = report.get("approvalDeferred")
+    if val is True or val == 1:
+        return True
+    if isinstance(val, str) and val.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return False
+
+
 def _abort_pending_reports_after_power_loss(session_username=None):
     """Finalize pending test/validation reports after unclean shutdown.
 
     - Operator already aborted → keep Aborted (not power interruption).
     - Completed test/validation awaiting approval → power interruption.
+    - Approve-later (approvalDeferred) reports stay pending in Unapproved Reports.
     """
     aborted = 0
     for report in data_service.list_reports("all", include_pending=True) or []:
@@ -803,6 +816,8 @@ def _abort_pending_reports_after_power_loss(session_username=None):
         if rtype not in ("test", "validation"):
             continue
         if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
+            continue
+        if _report_is_approval_deferred(report):
             continue
         report = _persist_unclean_shutdown_aborted_report(report)
         _audit_unclean_shutdown_aborted_report(report)
@@ -828,6 +843,9 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         except Exception:
             existing = None
         if existing and str(existing.get("reportApprovalStatus") or "").strip().lower() == "pending":
+            if _report_is_approval_deferred(existing):
+                data_service.clear_test_run_data()
+                return 0
             report = _persist_unclean_shutdown_aborted_report(existing)
             _audit_unclean_shutdown_aborted_report(report)
             data_service.clear_test_run_data()
@@ -1479,9 +1497,10 @@ def _require_user_manage_or_self(member_id: int):
 
 
 def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
-    """Self-service profile: only display name may change here.
+    """Self-service profile without profile-admin: only display name may change here.
 
     Password changes must use POST /api/data/auth/change-password (current + new).
+    Profile-admin self-edits use the full member payload (not this helper).
     """
     out = dict(existing)
     if "name" in payload:
@@ -1491,6 +1510,12 @@ def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
     if payload.get("password") is not None and str(payload.get("password") or "").strip():
         raise ValueError("Use Change Password (current password required) to update your password.")
     return out
+
+
+def _session_can_manage_profiles() -> bool:
+    if _effective_request_role() == "factory":
+        return True
+    return _session_has_internal("user-manage")
 
 
 @app.route("/api/data/auth/change-password", methods=["POST"])
@@ -2341,6 +2366,9 @@ def approve_report(report_id):
         # Preserve original username casing for display; comparisons use verified_username (lower).
         report["approvedByUsername"] = verified_username_raw or verified_username
         report["approvedAt"] = _utc_now_iso()
+        report.pop("approvalDeferred", None)
+        report.pop("approvalDeferredAt", None)
+        report.pop("approvalDeferredBy", None)
         td = report.get("testData")
         if isinstance(td, dict):
             results = td.get("stepResults")
@@ -2386,6 +2414,37 @@ def approve_report(report_id):
         return jsonify({"ok": True, "report": report, "preview": report_service.get_report_preview_data(report)}), 200
     except Exception as e:
         app.logger.exception("Error approving report")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/reports/<int:report_id>/defer-approval", methods=["POST"])
+def defer_report_approval(report_id):
+    """Mark a pending report as Approve later — stay in Unapproved until opened and approved."""
+    try:
+        gate = _require_auth()
+        if gate:
+            return gate
+        report = data_service.get_report(report_id)
+        if not report:
+            return jsonify({"ok": False, "error": "Report not found"}), 404
+        rtype = (report.get("type") or "").strip().lower()
+        if rtype not in ("test", "validation"):
+            return jsonify({"ok": False, "error": "Only test/validation reports can defer approval"}), 400
+        st = (report.get("reportApprovalStatus") or "").strip().lower()
+        if st != "pending":
+            return jsonify({"ok": False, "error": "Only pending reports can defer approval"}), 400
+        cur = data_service.get_current_user() or {}
+        report["approvalDeferred"] = True
+        report["approvalDeferredAt"] = _utc_now_iso()
+        report["approvalDeferredBy"] = str(cur.get("username") or cur.get("name") or "").strip() or "--"
+        data_service.save_report(report)
+        try:
+            data_service.clear_test_run_data()
+        except Exception:
+            app.logger.exception("Failed to clear checkpoint after deferring report %s", report_id)
+        return jsonify({"ok": True, "report": report, "preview": report_service.get_report_preview_data(report)}), 200
+    except Exception as e:
+        app.logger.exception("Error deferring report approval")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -2591,15 +2650,18 @@ def update_member(member_id):
         if not before_member:
             return jsonify({"error": "Member not found"}), 404
         is_self = _is_self_member(member_id)
-        if is_self:
+        can_manage = _session_can_manage_profiles()
+        # Self without profile-admin: name-only. Profile-admin (incl. self) may edit fully.
+        if is_self and not can_manage:
             try:
                 member_data = _self_profile_payload_from_request(before_member, member_data)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
-        elif _payload_has_protected_feature_overrides(member_data):
-            return jsonify({"error": "Protected features cannot be overridden."}), 400
-        if not is_self and data_service.has_non_empty_feature_overrides(member_data) and not _can_assign_feature_overrides():
-            return jsonify({"error": "Forbidden. You do not have permission to assign permission cards."}), 403
+        else:
+            if _payload_has_protected_feature_overrides(member_data):
+                return jsonify({"error": "Protected features cannot be overridden."}), 400
+            if "featureOverrides" in member_data and not _can_assign_feature_overrides():
+                return jsonify({"error": "Forbidden. You do not have permission to assign permission cards."}), 403
         member_data["id"] = member_id
         cur = data_service.get_current_user() or {}
         acting_id = cur.get("id")
@@ -2608,6 +2670,26 @@ def update_member(member_id):
         password_changed = "password" in member_data and new_password not in ("", old_password)
         data_service.save_member(member_data, acting_user_id=acting_id)
         updated = data_service.get_member(member_id) or dict(member_data)
+        # Apply profile/permission/password changes to the live session immediately.
+        try:
+            cur_id = None
+            try:
+                cur_id = int(cur.get("id")) if cur.get("id") is not None else None
+            except (TypeError, ValueError):
+                cur_id = None
+            if is_self or (cur_id is not None and cur_id == int(member_id)):
+                session_user = dict(cur)
+                session_user["id"] = updated.get("id", cur.get("id"))
+                session_user["name"] = updated.get("name", cur.get("name"))
+                session_user["username"] = updated.get("username", cur.get("username"))
+                session_user["role"] = updated.get("role", cur.get("role"))
+                session_user["featureOverrides"] = updated.get("featureOverrides")
+                session_user["permissionsVersion"] = updated.get("permissionsVersion")
+                data_service.save_current_user(session_user)
+            else:
+                data_service.refresh_current_user_from_member()
+        except Exception:
+            app.logger.exception("Failed to refresh session after member update %s", member_id)
         sig = {
             "mode": "session",
             "username": (cur.get("username") or cur.get("name") or "").strip() or "--",

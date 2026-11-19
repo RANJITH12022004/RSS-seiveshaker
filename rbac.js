@@ -2,10 +2,14 @@
  * rbac.js - Role-Based Access Control for Friability Tester
  *
  * Non-Factory users (including Admin): capability is driven only by permission cards
- * stored in featureOverrides.allow. Role name does not grant feature access.
- * Factory / RLERLT: full access except factory-only routes handled separately.
+ * stored in featureOverrides.allow. Role name is a label only — it must not grant or
+ * block feature access. Factory / RLERLT: full access except factory-only routes.
  */
 
+/**
+ * Legacy role table kept for reference / old callers of getRestriction().
+ * Runtime access must NOT use this to override permission cards.
+ */
 var ROLE_RESTRICTIONS = {
   admin: {
     'factory-settings': 'no-access',
@@ -319,15 +323,13 @@ function getEffectiveRestriction(roleOrUser, featureKey) {
     return 'full-access';
   }
 
+  // Permission cards are the sole grant/deny source for non-factory users.
+  // Role (User / Supervisor / Admin / QA) is display/assignment only — never a blocker.
   var expanded = getExpandedInternalKeysForUser(userObj);
   var hasFeature = expanded.indexOf(featureKey) !== -1 || expanded.some(function (k) {
     return (INTERNAL_PERMISSION_IMPLICATIONS[k] || []).indexOf(featureKey) !== -1;
   });
   if (!hasFeature) return 'no-access';
-
-  var roleCap = getRestriction(role, featureKey);
-  if (roleCap === 'no-access') return 'no-access';
-  if (roleCap === 'view-only') return 'view-only';
   return 'full-access';
 }
 

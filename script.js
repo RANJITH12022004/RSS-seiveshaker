@@ -1113,7 +1113,11 @@ function saveDeferredReportApprovalIds(ids) {
     } catch (e) { /* ignore */ }
 }
 
-function isReportApprovalDeferred(reportId) {
+function isReportApprovalDeferred(reportId, preview) {
+    var p = preview || window._lastReportPreview || {};
+    if (p && (p.approvalDeferred === true || p.approvalDeferred === 1 || String(p.approvalDeferred || '').toLowerCase() === 'true')) {
+        return true;
+    }
     if (reportId == null) return false;
     return loadDeferredReportApprovalIds().indexOf(String(reportId)) >= 0;
 }
@@ -1141,12 +1145,17 @@ function clearAllDeferredReportApprovals() {
 }
 
 function isReportPreviewNavigationLocked(preview) {
+    // Hard lock only while a post-test approval gate is active (setGate after save).
+    // Opening a pending report from Unapproved Reports must not trap the next user.
+    if (!hasActiveReportApprovalGate()) return false;
     var p = preview || window._lastReportPreview || {};
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
     if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation') return false;
     if (!isReportPendingApproval(p)) return false;
     var rid = currentReportId != null ? currentReportId : (p.id != null ? p.id : null);
-    if (isReportApprovalDeferred(rid)) return false;
+    var gateId = window._reportApprovalGate && window._reportApprovalGate.reportId;
+    if (rid != null && gateId != null && Number(rid) !== Number(gateId)) return false;
+    if (isReportApprovalDeferred(rid, p)) return false;
     return true;
 }
 
@@ -1163,7 +1172,7 @@ function guardReportPreviewNavigation(targetPage) {
     if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return false;
     if (targetPage === 'report-preview') return false;
     showAppModal(
-        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, tap Approve later to continue using the machine, or power off will save the test as Completed (power interruption), approved by System with Fail. Operator aborts stay Aborted.',
+        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or tap Approve later to leave it in Unapproved Reports for later approval.',
         'Report'
     );
     var active = document.querySelector('.page.active');
@@ -1425,7 +1434,7 @@ function deferReportApprovalLater() {
     var preview = window._lastReportPreview || {};
     var rid = currentReportId != null ? currentReportId : preview.id;
     if (rid == null || !isReportPendingApproval(preview)) return;
-    if (!isReportPreviewNavigationLocked(preview)) return;
+    if (!isReportPreviewNavigationLocked(preview) && !hasActiveReportApprovalGate()) return;
     markReportApprovalDeferred(rid);
     clearReportApprovalGate();
     stopReportApprovalPoll();
@@ -1436,10 +1445,22 @@ function deferReportApprovalLater() {
             { entityType: 'report', entityId: rid }
         );
     }
+    preview.approvalDeferred = true;
+    window._lastReportPreview = preview;
     applyReportPreviewLockUi(preview);
     if (typeof _trClearTestRunCheckpoint === 'function') _trClearTestRunCheckpoint();
+    // Durable server flag so power loss / next login does not re-trap or auto-abort this report.
+    apiRequest(API_BASE + '/api/data/reports/' + rid + '/defer-approval', { method: 'POST', body: {} })
+        .then(function (data) {
+            if (data && data.preview) {
+                window._lastReportPreview = data.preview;
+            } else if (data && data.report) {
+                preview.approvalDeferred = true;
+                window._lastReportPreview = preview;
+            }
+        })
+        .catch(function () { /* local defer still applied */ });
     // Set filter before navigate so goToPage('reports') loads Unapproved once.
-    // Calling filterReports afterward raced a second loadReports and duplicated rows.
     currentReportFilter = 'unapproved';
     if (typeof _auditActivePage !== 'undefined') _auditActivePage = 'reports';
     _suppressTestRunNavGuardOnce = true;
@@ -2539,6 +2560,9 @@ function login() {
     }).then(function (result) {
         var data = result.body || {};
         if (result.ok && data.success && data.user) {
+            if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+            if (typeof clearAllDeferredReportApprovals === 'function') clearAllDeferredReportApprovals();
+            window._lastReportPreview = null;
             window.currentUser = data.user;
             try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
             if (typeof currentUser !== 'undefined') currentUser = data.user;
@@ -3072,6 +3096,8 @@ function performAutoLogoutDueToInactivity() {
         try { localStorage.removeItem('currentUser'); } catch (e) {}
         if (typeof currentUser !== 'undefined') currentUser = null;
         clearReportApprovalGate();
+        if (typeof clearAllDeferredReportApprovals === 'function') clearAllDeferredReportApprovals();
+        window._lastReportPreview = null;
         showLoginScreen();
         setTimeout(function () {
             showAppModal('You were logged out due to inactivity.', 'Session');
@@ -3119,6 +3145,9 @@ function loginBiometric() {
     }).then(function (result) {
         var data = result.body || {};
         if (result.ok && data.success && data.user) {
+            if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+            if (typeof clearAllDeferredReportApprovals === 'function') clearAllDeferredReportApprovals();
+            window._lastReportPreview = null;
             window.currentUser = data.user;
             try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
             if (typeof currentUser !== 'undefined') currentUser = data.user;
@@ -4524,6 +4553,30 @@ function saveMemberForm() {
     saveNewMember();
 }
 
+function _applyMemberUpdateToLiveSession(member) {
+    if (!member || !window.currentUser) return false;
+    var cur = window.currentUser;
+    var sameId = cur.id != null && member.id != null && Number(cur.id) === Number(member.id);
+    var curUn = String(cur.username || '').trim().toLowerCase();
+    var memUn = String(member.username || '').trim().toLowerCase();
+    var sameUser = !!(curUn && memUn && curUn === memUn);
+    if (!sameId && !sameUser) return false;
+    window.currentUser = Object.assign({}, cur, {
+        id: member.id != null ? member.id : cur.id,
+        name: member.name != null ? member.name : cur.name,
+        username: member.username != null ? member.username : cur.username,
+        role: member.role != null ? member.role : cur.role,
+        featureOverrides: member.featureOverrides != null ? member.featureOverrides : cur.featureOverrides,
+        permissionsVersion: member.permissionsVersion != null ? member.permissionsVersion : cur.permissionsVersion
+    });
+    try { localStorage.setItem('currentUser', JSON.stringify(window.currentUser)); } catch (e) {}
+    if (typeof currentUser !== 'undefined') currentUser = window.currentUser;
+    if (typeof updateProfileFromCurrentUser === 'function') updateProfileFromCurrentUser(window.currentUser);
+    if (typeof refreshShellAccessVisibility === 'function') refreshShellAccessVisibility();
+    if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+    return true;
+}
+
 function saveEditedMember() {
     var memberId = editingMemberId;
     if (memberId == null) return;
@@ -4539,6 +4592,8 @@ function saveEditedMember() {
     var confirmPassword = confirmPwdEl && confirmPwdEl.value ? confirmPwdEl.value : '';
     var role = roleHidden && roleHidden.value ? roleHidden.value : 'User';
     var isSelf = typeof _isEditingOwnMemberProfile === 'function' && _isEditingOwnMemberProfile(memberId);
+    var canAssignCards = typeof sessionCanAssignFeatureOverrides === 'function' && sessionCanAssignFeatureOverrides();
+    var canManageProfiles = typeof canEditMembers === 'function' && canEditMembers();
     if (!fullName || !username) {
         showAppModal('Full name and User ID are required.', modalTitle);
         return;
@@ -4564,24 +4619,23 @@ function saveEditedMember() {
             if (!member) throw new Error('Member not found');
             member.name = fullName;
             member.username = username;
-            if (!isSelf) member.role = role;
+            // Profile-admin may change role/cards even when editing their own profile.
+            if (!isSelf || canManageProfiles) member.role = role;
             if (password) member.password = password;
-            if (!isSelf && _addMemberPermissionsPanelShouldShow()) {
+            if (canAssignCards && (!isSelf || canManageProfiles) && _addMemberPermissionsPanelShouldShow()) {
                 var overrides = _addMemberFeatureOverrides || { allow: [], deny: [] };
                 var allowList = (overrides.allow || []).slice();
                 if (allowList.length < 1) {
                     showAppModal('Select at least one user functionality to continue.', modalTitle);
                     return Promise.reject(new Error('permissions'));
                 }
-                if (!sessionCanAssignFeatureOverrides()) {
-                    showAppModal('You do not have permission to change permission cards.', modalTitle);
-                    return Promise.reject(new Error('permissions'));
-                }
                 member.featureOverrides = { allow: allowList, deny: [] };
             }
             return apiRequest(API_BASE + '/api/data/members/' + memberId, { method: 'PUT', body: member });
         })
-        .then(function () {
+        .then(function (res) {
+            var updated = (res && res.member) ? res.member : null;
+            if (updated) _applyMemberUpdateToLiveSession(updated);
             editingMemberId = null;
             if (typeof _clearAddMemberForm === 'function') _clearAddMemberForm();
             loadMembersAndRender();
@@ -6296,10 +6350,17 @@ function openReportPreview(reportId, options) {
                 showAppModal('Could not render report preview: ' + (populateErr && populateErr.message ? populateErr.message : 'Display error'), 'Reports');
                 return;
             }
-            setReportApprovalGateFromPreview(data.preview, reportId);
+            // Hard lock only after a just-finished test/validation (setGate: true).
+            // Opening from Unapproved/All reports must not trap the next logged-in user.
+            if (options.setGate) {
+                setReportApprovalGateFromPreview(data.preview, reportId);
+            } else if (!hasActiveReportApprovalGate() ||
+                (window._reportApprovalGate && Number(window._reportApprovalGate.reportId) === Number(reportId))) {
+                if (!options.setGate) clearReportApprovalGate();
+            }
             applyReportPreviewLockUi(data.preview);
             goToPage('report-preview');
-            startReportApprovalPollIfLocked();
+            if (options.setGate) startReportApprovalPollIfLocked();
             setTimeout(function () {
                 if (isReportPreviewNavigationLocked(data.preview)) {
                     scrollReportPendingBannerIntoView();
@@ -9814,19 +9875,24 @@ function _setAddMemberPageMode(isEdit, isSelfEdit) {
     var confirmPwdLabel = document.getElementById('add-confirm-password-label');
     var roleContainer = document.querySelector('#page-add-member .role-selection-container');
     var headerTitle = document.getElementById('header-title');
+    var canManageProfiles = typeof canEditMembers === 'function' && canEditMembers();
+    // Profile-admin editing self still gets role + permission cards.
+    var lockSelfAdminFields = !!(isSelfEdit && !canManageProfiles);
     if (titleEl) titleEl.textContent = isEdit ? 'Edit Profile' : 'Add New Member';
     if (saveBtn) saveBtn.textContent = isEdit ? 'Update Profile' : 'Save Profile';
     if (headerTitle) headerTitle.textContent = isEdit ? 'Edit Profile' : (PAGE_TITLES['add-member'] || 'Add New Member');
     if (userIdEl) {
-        userIdEl.readOnly = !!isEdit;
-        userIdEl.disabled = !!isEdit;
-        if (isEdit) userIdEl.classList.add('input-readonly');
+        // Profile-admin may change User ID; plain self-edit keeps it locked.
+        var lockUserId = !!isEdit && lockSelfAdminFields;
+        userIdEl.readOnly = lockUserId;
+        userIdEl.disabled = lockUserId;
+        if (lockUserId) userIdEl.classList.add('input-readonly');
         else userIdEl.classList.remove('input-readonly');
     }
     if (pwdLabel) pwdLabel.textContent = isEdit ? 'New Password (optional)' : 'Password';
     if (confirmPwdLabel) confirmPwdLabel.textContent = isEdit ? 'Confirm New Password (optional)' : 'Confirm Password';
-    if (roleContainer) roleContainer.style.display = isSelfEdit ? 'none' : '';
-    if (isSelfEdit) {
+    if (roleContainer) roleContainer.style.display = lockSelfAdminFields ? 'none' : '';
+    if (lockSelfAdminFields) {
         var panel = document.getElementById('add-member-permissions-panel');
         if (panel) {
             panel.classList.add('is-hidden');
@@ -9854,6 +9920,7 @@ function openEditMember(id) {
             }
             editingMemberId = member.id;
             var isSelf = _isEditingOwnMemberProfile(member.id);
+            var canManageProfiles = typeof canEditMembers === 'function' && canEditMembers();
             ['add-password', 'add-confirm-password'].forEach(function (fid) {
                 var el = document.getElementById(fid);
                 if (el) el.value = '';
@@ -9862,10 +9929,10 @@ function openEditMember(id) {
             var userIdEl = document.getElementById('add-userid');
             if (fullNameEl) fullNameEl.value = member.name || '';
             if (userIdEl) userIdEl.value = member.username || '';
-            if (!isSelf && typeof selectRole === 'function') {
+            if ((!isSelf || canManageProfiles) && typeof selectRole === 'function') {
                 selectRole(member.role || 'User');
             }
-            if (!isSelf) _loadMemberOverridesIntoPanel(member.featureOverrides);
+            if (!isSelf || canManageProfiles) _loadMemberOverridesIntoPanel(member.featureOverrides);
             _setAddMemberPageMode(true, isSelf);
             goToPage('add-member');
             setTimeout(function () {
