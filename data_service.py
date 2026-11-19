@@ -1779,13 +1779,20 @@ def get_test_run_data() -> Dict[str, Any]:
 
 
 def clear_test_run_data() -> None:
-    """Remove in-progress test run checkpoint (after normal complete/abort save)."""
+    """Remove in-progress test run checkpoint (after normal complete/abort save).
+
+    Deletes both the live file and its .bak. Leaving .bak behind lets
+    _load_json_file / _repair_corrupt_storage_files resurrect a finished run and
+    create a duplicate power-interruption report on the next bridge restart.
+    """
     test_path = _get_storage_path("test_run.json")
-    if test_path.exists():
-        try:
-            test_path.unlink()
-        except Exception:
-            pass
+    bak_path = _backup_path(test_path)
+    for path in (test_path, bak_path):
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                _logger.exception("Failed to remove test-run checkpoint file %s", path.name)
 
 
 # =================== REPORT EXPORT SCHEDULE (24h purge, Tap Density style) =======

@@ -840,6 +840,33 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         data_service.clear_test_run_data()
         return 0
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    # If this run already produced a saved report (complete or abort), do not invent
+    # a second power-interruption copy from a leftover checkpoint/.bak.
+    cp_start = str(
+        (td.get("testStartTime") if isinstance(td, dict) else None)
+        or cp.get("createdAt")
+        or ""
+    ).strip()
+    if cp_start:
+        try:
+            for existing in data_service._load_reports_raw() or []:
+                etd = existing.get("testData") if isinstance(existing.get("testData"), dict) else {}
+                estart = str(
+                    etd.get("testStartTime")
+                    or existing.get("createdAt")
+                    or ""
+                ).strip()
+                if estart and estart == cp_start:
+                    app.logger.info(
+                        "Skipping duplicate unclean-shutdown report; checkpoint start %s "
+                        "already covered by report id %s",
+                        cp_start,
+                        existing.get("id"),
+                    )
+                    data_service.clear_test_run_data()
+                    return 0
+        except Exception:
+            app.logger.exception("Checkpoint duplicate-report guard failed")
     report_data = dict(cp)
     # Keep checkpoint timestamps available for duration stamping, then strip meta keys.
     enriched_input = dict(report_data)
@@ -2213,6 +2240,13 @@ def create_report():
         report_id = data_service.save_report(enriched)
         enriched = report_service.enrich_report_context({**enriched, "id": report_id})
         data_service.save_report(enriched)
+        # Server-side clear so a failed/late client DELETE cannot leave a checkpoint
+        # that resurrects as a duplicate power-interruption report on restart.
+        if (enriched.get("type") or "").strip().lower() in ("test", "validation"):
+            try:
+                data_service.clear_test_run_data()
+            except Exception:
+                app.logger.exception("Failed to clear test-run checkpoint after saving report %s", report_id)
         approval_st = str(enriched.get("reportApprovalStatus") or "").strip().lower()
         if approval_st == "pending":
             _remove_report_pdf_file(report_id)

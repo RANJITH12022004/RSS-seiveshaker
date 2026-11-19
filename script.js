@@ -35,6 +35,8 @@ document.addEventListener('selectstart', function (e) {
 
 var API_BASE = '';
 var currentReportFilter = null;
+/** Monotonic seq so overlapping loadReports calls cannot append duplicate rows. */
+var _reportsLoadSeq = 0;
 var membersCache = [];
 var FACTORY_USERNAME = 'RLERLT';
 var currentMemberIdForRoleEdit = null;
@@ -1436,9 +1438,12 @@ function deferReportApprovalLater() {
     }
     applyReportPreviewLockUi(preview);
     if (typeof _trClearTestRunCheckpoint === 'function') _trClearTestRunCheckpoint();
+    // Set filter before navigate so goToPage('reports') loads Unapproved once.
+    // Calling filterReports afterward raced a second loadReports and duplicated rows.
+    currentReportFilter = 'unapproved';
+    if (typeof _auditActivePage !== 'undefined') _auditActivePage = 'reports';
     _suppressTestRunNavGuardOnce = true;
     goToPage('reports');
-    if (typeof filterReports === 'function') filterReports('unapproved');
 }
 
 function applyReportPreviewLockUi(preview) {
@@ -5517,6 +5522,7 @@ function loadReports(filterType) {
     var bar = document.getElementById('audit-filters-bar');
     if (!tbody) return;
     if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
+    var loadSeq = ++_reportsLoadSeq;
     tbody.innerHTML = '';
 
     if (filterType === 'audit') {
@@ -5556,6 +5562,7 @@ function loadReports(filterType) {
         var auditUrl = API_BASE + '/api/data/audit-log' + (q.length ? '?' + q.join('&') : '');
         showAuditTrailsLoadingOverlay();
         apiRequest(auditUrl).then(function (data) {
+            if (loadSeq !== _reportsLoadSeq) return;
             var list = (data && data.entries) ? data.entries : [];
             var filterTask = Promise.resolve();
             if (userEl && userEl.options.length <= 1) {
@@ -5565,15 +5572,17 @@ function loadReports(filterType) {
                 }).catch(function () {});
             }
             return filterTask.then(function () {
+                if (loadSeq !== _reportsLoadSeq) return;
                 _renderAuditLogRows(tbody, list);
             });
         }).catch(function () {
+            if (loadSeq !== _reportsLoadSeq) return;
             tbody.innerHTML = '';
             var emptyRow = document.createElement('tr');
             emptyRow.innerHTML = '<td colspan="5">Unable to load audit log.</td>';
             tbody.appendChild(emptyRow);
         }).finally(function () {
-            hideAuditTrailsLoadingOverlay();
+            if (loadSeq === _reportsLoadSeq) hideAuditTrailsLoadingOverlay();
         });
         return;
     }
@@ -5589,6 +5598,8 @@ function loadReports(filterType) {
         ? filterType
         : 'all';
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
+        if (loadSeq !== _reportsLoadSeq) return;
+        tbody.innerHTML = '';
         var list = (data && data.reports) ? data.reports : [];
         if (!list.length) {
             var emptyRow = document.createElement('tr');
@@ -5616,6 +5627,8 @@ function loadReports(filterType) {
             });
         }
     }).catch(function () {
+        if (loadSeq !== _reportsLoadSeq) return;
+        tbody.innerHTML = '';
         var emptyRow = document.createElement('tr');
         emptyRow.innerHTML = '<td colspan="4">Unable to load reports.</td>';
         tbody.appendChild(emptyRow);
@@ -6484,6 +6497,7 @@ function populateReportPreview(preview) {
 
     // Sieve shaker: always use monospace A4 text (vertical ## graph) — same as A4 print body.
     // No Printed Date/Time in a4Text (added only on live print).
+    // Never inject htmlPreview <style> into the live DOM (washes out Session/export modals).
     if (htmlDiv) { htmlDiv.style.display = 'none'; htmlDiv.innerHTML = ''; }
     var useA4 = !!(a4Text && String(a4Text).trim());
     if (useA4) {
